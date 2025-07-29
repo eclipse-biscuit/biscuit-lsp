@@ -6,10 +6,11 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::SemanticTokenType;
 
 use crate::semantic_token::LEGEND_TYPE;
+use crate::span::Span;
 
 /// This is the parser and interpreter for the 'Foo' language. See `tutorial.md` in the repository's root to learn
 /// about it.
-pub type Span = std::ops::Range<usize>;
+
 #[derive(Debug)]
 pub struct ImCompleteSemanticToken {
     pub start: usize,
@@ -32,16 +33,18 @@ pub enum Token {
     Else,
 }
 
+pub type Ast = Vec<Spanned<Func>>;
+
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Token::Null => write!(f, "null"),
-            Token::Bool(x) => write!(f, "{}", x),
-            Token::Num(n) => write!(f, "{}", n),
-            Token::Str(s) => write!(f, "{}", s),
-            Token::Op(s) => write!(f, "{}", s),
-            Token::Ctrl(c) => write!(f, "{}", c),
-            Token::Ident(s) => write!(f, "{}", s),
+            Token::Bool(x) => write!(f, "{x}"),
+            Token::Num(n) => write!(f, "{n}"),
+            Token::Str(s) => write!(f, "{s}"),
+            Token::Op(s) => write!(f, "{s}"),
+            Token::Ctrl(c) => write!(f, "{c}"),
+            Token::Ident(s) => write!(f, "{s}"),
             Token::Fn => write!(f, "fn"),
             Token::Let => write!(f, "let"),
             Token::Print => write!(f, "print"),
@@ -111,26 +114,15 @@ pub enum Value {
     Bool(bool),
     Num(f64),
     Str(String),
-    List(Vec<Value>),
-    Func(String),
 }
 
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::Null => write!(f, "null"),
-            Self::Bool(x) => write!(f, "{}", x),
-            Self::Num(x) => write!(f, "{}", x),
-            Self::Str(x) => write!(f, "{}", x),
-            Self::List(xs) => write!(
-                f,
-                "[{}]",
-                xs.iter()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Self::Func(name) => write!(f, "<function: {}>", name),
+            Self::Bool(x) => write!(f, "{x}"),
+            Self::Num(x) => write!(f, "{x}"),
+            Self::Str(x) => write!(f, "{x}"),
         }
     }
 }
@@ -412,7 +404,7 @@ fn expr_parser() -> impl Parser<Token, Spanned<Expr>, Error = Simple<Token>> + C
     })
 }
 
-pub fn funcs_parser() -> impl Parser<Token, HashMap<String, Func>, Error = Simple<Token>> + Clone {
+pub fn funcs_parser() -> impl Parser<Token, Vec<Spanned<Func>>, Error = Simple<Token>> + Clone {
     let ident = filter_map(|span, tok| match tok {
         Token::Ident(ident) => Ok(ident),
         _ => Err(Simple::expected_input_found(span, Vec::new(), Some(tok))),
@@ -462,16 +454,10 @@ pub fn funcs_parser() -> impl Parser<Token, HashMap<String, Func>, Error = Simpl
 
     func.repeated()
         .try_map(|fs, _| {
-            let mut funcs = HashMap::new();
-            for ((name, name_span), f) in fs {
-                if funcs.insert(name.clone(), f).is_some() {
-                    return Err(Simple::custom(
-                        name_span,
-                        format!("Function '{}' already exists", name),
-                    ));
-                }
-            }
-            Ok(funcs)
+            Ok(fs
+                .into_iter()
+                .map(|item| (item.1, item.0 .1))
+                .collect::<Vec<_>>())
         })
         .then_ignore(end())
 }
@@ -506,13 +492,14 @@ pub fn type_inference(expr: &Spanned<Expr>, symbol_type_table: &mut HashMap<Span
     }
 }
 
-pub fn parse(
-    src: &str,
-) -> (
-    Option<HashMap<String, Func>>,
-    Vec<Simple<String>>,
-    Vec<ImCompleteSemanticToken>,
-) {
+#[derive(Debug)]
+pub struct ParserResult {
+    pub ast: Option<Vec<Spanned<Func>>>,
+    pub parse_errors: Vec<Simple<String>>,
+    pub semantic_tokens: Vec<ImCompleteSemanticToken>,
+}
+
+pub fn parse(src: &str) -> ParserResult {
     let (tokens, errs) = lexer().parse_recovery(src);
 
     let (ast, tokenize_errors, semantic_tokens) = if let Some(tokens) = tokens {
@@ -595,19 +582,6 @@ pub fn parse(
         let (ast, parse_errs) =
             funcs_parser().parse_recovery(Stream::from_iter(len..len + 1, tokens.into_iter()));
 
-        // println!("{:#?}", ast);
-        // if let Some(funcs) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
-        //     if let Some(main) = funcs.get("main") {
-        //         assert_eq!(main.args.len(), 0);
-        //         match eval_expr(&main.body, &funcs, &mut Vec::new()) {
-        //             Ok(val) => println!("Return value: {}", val),
-        //             Err(e) => errs.push(Simple::custom(e.span, e.msg)),
-        //         }
-        //     } else {
-        //         panic!("No main function!");
-        //     }
-        // }
-
         (ast, parse_errs, semantic_tokens)
     } else {
         (None, Vec::new(), vec![])
@@ -623,12 +597,9 @@ pub fn parse(
         )
         .collect::<Vec<_>>();
 
-    (ast, parse_errors, semantic_tokens)
-    // .for_each(|e| {
-    //     let report = match e.reason() {
-    //         chumsky::error::SimpleReason::Unclosed { span, delimiter } => {}
-    //         chumsky::error::SimpleReason::Unexpected => {}
-    //         chumsky::error::SimpleReason::Custom(msg) => {}
-    //     };
-    // });
+    ParserResult {
+        ast,
+        parse_errors,
+        semantic_tokens,
+    }
 }
