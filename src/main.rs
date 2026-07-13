@@ -42,6 +42,8 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 execute_command_provider: None,
 
                 workspace: Some(WorkspaceServerCapabilities {
@@ -52,7 +54,6 @@ impl LanguageServer for Backend {
                     file_operations: None,
                 }),
                 semantic_tokens_provider: None,
-                references_provider: None,
                 rename_provider: None,
                 ..ServerCapabilities::default()
             },
@@ -66,6 +67,121 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let position = params.text_document_position_params.position;
+
+        let doc_data = match self.document_map.get(&uri) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+        let byte_offset = position_to_offset(&position, rope).unwrap_or(0);
+
+        // Find the node at cursor
+        let node = find_node_at_cursor(tree.root_node(), byte_offset);
+
+        // Find all references based on node type (same as find references)
+        let references = match node.kind() {
+            "variable" => find_variable_references(tree.root_node(), &node, byte_offset, rope),
+            "nname" => {
+                if let Some(parent) = node.parent() {
+                    find_symbol_references(tree.root_node(), &node, &parent, rope)
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        };
+
+        if references.is_empty() {
+            return Ok(None);
+        }
+
+        // Convert byte ranges to DocumentHighlight, excluding the one under cursor
+        let cursor_start = node.start_byte();
+        let cursor_end = node.end_byte();
+        let highlights: Vec<DocumentHighlight> = references
+            .into_iter()
+            .filter(|(start, end)| *start != cursor_start || *end != cursor_end)
+            .filter_map(|(start, end)| {
+                let start_pos = offset_to_position(start, rope)?;
+                let end_pos = offset_to_position(end, rope)?;
+                Some(DocumentHighlight {
+                    range: Range::new(start_pos, end_pos),
+                    kind: Some(DocumentHighlightKind::TEXT),
+                })
+            })
+            .collect();
+
+        Ok(Some(highlights))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+
+        let doc_data = match self.document_map.get(&uri) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+        let byte_offset = position_to_offset(&position, rope).unwrap_or(0);
+
+        // Find the node at cursor
+        let node = find_node_at_cursor(tree.root_node(), byte_offset);
+
+        // Find all references based on node type
+        let references = match node.kind() {
+            "variable" => find_variable_references(tree.root_node(), &node, byte_offset, rope),
+            "nname" => {
+                if let Some(parent) = node.parent() {
+                    find_symbol_references(tree.root_node(), &node, &parent, rope)
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        };
+
+        if references.is_empty() {
+            return Ok(None);
+        }
+
+        // Convert byte ranges to Locations, excluding the one under cursor
+        let cursor_start = node.start_byte();
+        let cursor_end = node.end_byte();
+        let locations: Vec<Location> = references
+            .into_iter()
+            .filter(|(start, end)| *start != cursor_start || *end != cursor_end)
+            .filter_map(|(start, end)| {
+                let start_pos = offset_to_position(start, rope)?;
+                let end_pos = offset_to_position(end, rope)?;
+                Some(Location {
+                    uri: params.text_document_position.text_document.uri.clone(),
+                    range: Range::new(start_pos, end_pos),
+                })
+            })
+            .collect();
+
+        Ok(Some(locations))
     }
 
     async fn goto_definition(
@@ -713,6 +829,87 @@ fn find_variable_definition(
     });
 
     first_occurrence
+}
+
+/// Find all references to a variable (within its scope)
+fn find_variable_references(
+    root: tree_sitter::Node,
+    variable_node: &tree_sitter::Node,
+    byte_offset: usize,
+    rope: &Rope,
+) -> Vec<(usize, usize)> {
+    let var_name = rope.byte_slice(variable_node.start_byte()..variable_node.end_byte()).to_string();
+
+    // Find the enclosing context (rule/check/policy)
+    let context = match find_enclosing_context(root, byte_offset) {
+        Some(ctx) => ctx,
+        None => return Vec::new(),
+    };
+
+    let mut references = Vec::new();
+
+    // Find all occurrences of this variable in the context
+    visit_node(&context, &mut |node| {
+        if node.kind() == "variable" {
+            let node_name = rope.byte_slice(node.start_byte()..node.end_byte()).to_string();
+            if node_name == var_name {
+                references.push((node.start_byte(), node.end_byte()));
+            }
+        }
+    });
+
+    references
+}
+
+/// Find all references to a fact or rule by name and arity
+fn find_symbol_references(
+    root: tree_sitter::Node,
+    name_node: &tree_sitter::Node,
+    parent_node: &tree_sitter::Node,
+    rope: &Rope,
+) -> Vec<(usize, usize)> {
+    let name = rope.byte_slice(name_node.start_byte()..name_node.end_byte()).to_string();
+
+    // Determine the arity from the parent node
+    let target_arity = match parent_node.kind() {
+        "fact" => count_fact_arguments(parent_node),
+        "predicate" => count_predicate_arguments(parent_node),
+        _ => return Vec::new(),
+    };
+
+    let mut references = Vec::new();
+
+    visit_node(&root, &mut |node| {
+        match node.kind() {
+            "fact" => {
+                // Check if this fact has the matching name and arity
+                if let Some(fact_name_node) = node.child_by_field_name("name").or_else(|| node.child(0)) {
+                    if fact_name_node.kind() == "nname" {
+                        let fact_name = rope.byte_slice(fact_name_node.start_byte()..fact_name_node.end_byte()).to_string();
+                        let fact_arity = count_fact_arguments(node);
+                        if fact_name == name && fact_arity == target_arity {
+                            references.push((fact_name_node.start_byte(), fact_name_node.end_byte()));
+                        }
+                    }
+                }
+            }
+            "predicate" => {
+                // Check if this predicate has the matching name and arity
+                if let Some(pred_name_node) = node.child(0) {
+                    if pred_name_node.kind() == "nname" {
+                        let pred_name = rope.byte_slice(pred_name_node.start_byte()..pred_name_node.end_byte()).to_string();
+                        let pred_arity = count_predicate_arguments(node);
+                        if pred_name == name && pred_arity == target_arity {
+                            references.push((pred_name_node.start_byte(), pred_name_node.end_byte()));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+
+    references
 }
 
 /// Find the definition of a fact or rule by name and arity
