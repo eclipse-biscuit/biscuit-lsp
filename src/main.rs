@@ -96,15 +96,18 @@ impl LanguageServer for Backend {
         // Get completions from multiple sources
         let mut items = Vec::new();
 
-        // 1. Symbol-based completions (fact and rule names)
+        // 1. Keyword completions
+        items.extend(get_keyword_completions());
+
+        // 2. Symbol-based completions (fact and rule names)
         let symbol_items = get_symbol_completions(tree, &doc_data.rope);
         items.extend(symbol_items);
 
-        // 2. Variable completions (scoped to current context)
+        // 3. Variable completions (scoped to current context)
         let variable_items = get_variable_completions(tree, &doc_data.rope, byte_offset);
         items.extend(variable_items);
 
-        // 3. Method completions (if we're in a method call context)
+        // 4. Method completions (if we're in a method call context)
         if in_method_context {
             items.extend(get_method_completions());
         }
@@ -648,6 +651,90 @@ fn is_in_method_context(node: tree_sitter::Node, byte_offset: usize, rope: &Rope
     }
 
     false
+}
+
+/// Get hardcoded keyword completions for biscuit language constructs
+fn get_keyword_completions() -> Vec<CompletionItem> {
+    vec![
+        CompletionItem {
+            label: "check if".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Check constraint".to_string()),
+            insert_text: Some("check if $0".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "check all".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Check all constraints".to_string()),
+            insert_text: Some("check all $0".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "reject if".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Reject if condition".to_string()),
+            insert_text: Some("reject if $0".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "allow if".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Allow if condition (policy)".to_string()),
+            insert_text: Some("allow if $0".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "deny if".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Deny if condition (policy)".to_string()),
+            insert_text: Some("deny if $0".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "trusting".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Origin clause".to_string()),
+            insert_text: Some("trusting $0".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "previous".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Trust previous block".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "authority".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Trust authority block".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "true".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Boolean true".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "false".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Boolean false".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "null".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Null value".to_string()),
+            ..Default::default()
+        },
+    ]
 }
 
 /// Get hardcoded method completions for biscuit built-in methods
