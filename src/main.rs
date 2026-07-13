@@ -44,6 +44,7 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
                 execute_command_provider: None,
 
                 workspace: Some(WorkspaceServerCapabilities {
@@ -54,7 +55,6 @@ impl LanguageServer for Backend {
                     file_operations: None,
                 }),
                 semantic_tokens_provider: None,
-                rename_provider: None,
                 ..ServerCapabilities::default()
             },
         })
@@ -67,6 +67,88 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+
+        let doc_data = match self.document_map.get(&uri) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+        let byte_offset = position_to_offset(&position, rope).unwrap_or(0);
+
+        // Find the node at cursor
+        let node = find_node_at_cursor(tree.root_node(), byte_offset);
+
+        // Find all references to rename
+        let (references, is_variable) = match node.kind() {
+            "variable" => (
+                find_variable_references(tree.root_node(), &node, byte_offset, rope),
+                true,
+            ),
+            "nname" => {
+                if let Some(parent) = node.parent() {
+                    (
+                        find_symbol_references(tree.root_node(), &node, &parent, rope),
+                        false,
+                    )
+                } else {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
+        };
+
+        if references.is_empty() {
+            return Ok(None);
+        }
+
+        // For variables, ensure the new name has the $ prefix
+        let final_new_name = if is_variable {
+            if new_name.starts_with('$') {
+                new_name
+            } else {
+                format!("${}", new_name)
+            }
+        } else {
+            new_name
+        };
+
+        // Create text edits for all references
+        let text_edits: Vec<TextEdit> = references
+            .into_iter()
+            .filter_map(|(start, end)| {
+                let start_pos = offset_to_position(start, rope)?;
+                let end_pos = offset_to_position(end, rope)?;
+                Some(TextEdit {
+                    range: Range::new(start_pos, end_pos),
+                    new_text: final_new_name.clone(),
+                })
+            })
+            .collect();
+
+        if text_edits.is_empty() {
+            return Ok(None);
+        }
+
+        // Create workspace edit
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(params.text_document_position.text_document.uri, text_edits);
+
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
     }
 
     async fn document_highlight(
