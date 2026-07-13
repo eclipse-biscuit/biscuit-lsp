@@ -3,6 +3,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+mod code_actions;
+
 use nom::Offset;
 
 use biscuit_auth::parser::parse_source;
@@ -45,6 +47,7 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 execute_command_provider: None,
 
                 workspace: Some(WorkspaceServerCapabilities {
@@ -67,6 +70,57 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri.to_string();
+        let range = params.range;
+
+        let doc_data = match self.document_map.get(&uri) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+
+        // Convert range to byte offsets
+        let start_offset = position_to_offset(&range.start, rope).unwrap_or(0);
+        let end_offset = position_to_offset(&range.end, rope).unwrap_or(start_offset);
+
+        // Find node at cursor
+        let node = find_node_at_cursor(tree.root_node(), start_offset);
+
+        let mut actions = Vec::new();
+
+        // 1. Add trusting clause
+        if let Some(action) = code_actions::create_add_trusting_clause_action(&node, rope, &params.text_document.uri) {
+            actions.push(action);
+        }
+
+        // 2. Convert between check variants (returns all possible conversions)
+        actions.extend(code_actions::create_convert_check_variant_actions(&node, rope, &params.text_document.uri));
+
+        // 3. Convert between policy types
+        actions.extend(code_actions::create_convert_policy_type_actions(&node, rope, &params.text_document.uri));
+
+        // 4. Convert literal to parameter
+        if let Some(action) = code_actions::create_convert_to_parameter_action(&node, rope, &params.text_document.uri, start_offset, end_offset) {
+            actions.push(action);
+        }
+
+        // 5. Convert parameter to literal
+        actions.extend(code_actions::create_convert_parameter_to_literal_actions(&node, rope, &params.text_document.uri));
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -588,7 +642,7 @@ async fn main() {
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
-fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
+pub fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
     let line = rope.try_char_to_line(offset).ok()?;
     let first_char_of_line = rope.try_line_to_char(line).ok()?;
     let column = offset - first_char_of_line;
