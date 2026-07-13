@@ -100,7 +100,11 @@ impl LanguageServer for Backend {
         let symbol_items = get_symbol_completions(tree, &doc_data.rope);
         items.extend(symbol_items);
 
-        // 2. Method completions (if we're in a method call context)
+        // 2. Variable completions (scoped to current context)
+        let variable_items = get_variable_completions(tree, &doc_data.rope, byte_offset);
+        items.extend(variable_items);
+
+        // 3. Method completions (if we're in a method call context)
         if in_method_context {
             items.extend(get_method_completions());
         }
@@ -443,10 +447,19 @@ fn get_symbol_completions(tree: &Tree, rope: &Rope) -> Vec<CompletionItem> {
                         let start = name_node.start_byte();
                         let end = name_node.end_byte();
                         let name = rope.byte_slice(start..end).to_string();
+
+                        // Count the number of arguments
+                        let arity = count_fact_arguments(node);
+                        let snippet = create_predicate_snippet(&name, arity);
+
                         items.push(CompletionItem {
-                            label: name.clone(),
+                            label: format!("{}/{}", name, arity),
                             kind: Some(CompletionItemKind::FUNCTION),
                             detail: Some(format!("Fact: {}", name)),
+                            insert_text: Some(snippet),
+                            insert_text_format: Some(InsertTextFormat::SNIPPET),
+                            filter_text: Some(name.clone()),
+                            sort_text: Some(name.clone()),
                             ..Default::default()
                         });
                     }
@@ -462,10 +475,19 @@ fn get_symbol_completions(tree: &Tree, rope: &Rope) -> Vec<CompletionItem> {
                                 let start = name_node.start_byte();
                                 let end = name_node.end_byte();
                                 let name = rope.byte_slice(start..end).to_string();
+
+                                // Count the number of arguments
+                                let arity = count_predicate_arguments(&head);
+                                let snippet = create_predicate_snippet(&name, arity);
+
                                 items.push(CompletionItem {
-                                    label: name.clone(),
+                                    label: format!("{}/{}", name, arity),
                                     kind: Some(CompletionItemKind::FUNCTION),
                                     detail: Some(format!("Rule: {}", name)),
+                                    insert_text: Some(snippet),
+                                    insert_text_format: Some(InsertTextFormat::SNIPPET),
+                                    filter_text: Some(name.clone()),
+                                    sort_text: Some(name.clone()),
                                     ..Default::default()
                                 });
                             }
@@ -480,6 +502,42 @@ fn get_symbol_completions(tree: &Tree, rope: &Rope) -> Vec<CompletionItem> {
     items
 }
 
+/// Count arguments in a fact node
+fn count_fact_arguments(fact_node: &tree_sitter::Node) -> usize {
+    let mut count = 0;
+    let mut cursor = fact_node.walk();
+    for child in fact_node.children(&mut cursor) {
+        if child.kind() == "fact_term" {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Count arguments in a predicate node
+fn count_predicate_arguments(predicate_node: &tree_sitter::Node) -> usize {
+    let mut count = 0;
+    let mut cursor = predicate_node.walk();
+    for child in predicate_node.children(&mut cursor) {
+        if child.kind() == "term" {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Create a snippet for a predicate with placeholders for each argument
+fn create_predicate_snippet(name: &str, arity: usize) -> String {
+    if arity == 0 {
+        format!("{}()$0", name)
+    } else {
+        let placeholders: Vec<String> = (1..=arity)
+            .map(|i| format!("${}", i))
+            .collect();
+        format!("{}({})$0", name, placeholders.join(", "))
+    }
+}
+
 /// Visit all nodes in the tree recursively
 fn visit_node<F>(node: &tree_sitter::Node, visitor: &mut F)
 where
@@ -489,6 +547,81 @@ where
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         visit_node(&child, visitor);
+    }
+}
+
+/// Extract variables from the tree for completion, scoped to the current context
+/// Returns unique variable names found in scope at the given byte offset
+fn get_variable_completions(tree: &Tree, rope: &Rope, byte_offset: usize) -> Vec<CompletionItem> {
+    let mut variables = std::collections::HashSet::new();
+    let root = tree.root_node();
+
+    // Find the enclosing rule/check/policy for the cursor position
+    let context_node = find_enclosing_context(root, byte_offset);
+
+    if let Some(context) = context_node {
+        // Only collect variables from the current scope
+        visit_node(&context, &mut |node| {
+            if node.kind() == "variable" {
+                let start = node.start_byte();
+                let end = node.end_byte();
+                // Exclude the variable currently being typed (cursor is within its range)
+                // and only include variables that end before the cursor
+                if end < byte_offset {
+                    let var_text = rope.byte_slice(start..end).to_string();
+                    variables.insert(var_text);
+                }
+            }
+        });
+    } else {
+        // Fallback: collect all variables in the document
+        visit_node(&root, &mut |node| {
+            if node.kind() == "variable" {
+                let start = node.start_byte();
+                let end = node.end_byte();
+                // Exclude the variable currently being typed
+                if end < byte_offset {
+                    let var_text = rope.byte_slice(start..end).to_string();
+                    variables.insert(var_text);
+                }
+            }
+        });
+    }
+
+    // Convert to completion items
+    variables
+        .into_iter()
+        .map(|var| {
+            // Strip the $ prefix from insert_text to avoid duplication
+            let insert_text = if let Some(stripped) = var.strip_prefix('$') {
+                stripped.to_string()
+            } else {
+                var.clone()
+            };
+
+            CompletionItem {
+                label: var.clone(),
+                kind: Some(CompletionItemKind::VARIABLE),
+                detail: Some("Variable".to_string()),
+                insert_text: Some(insert_text),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+/// Find the enclosing rule/check/policy node for scope-aware completion
+fn find_enclosing_context(root: tree_sitter::Node, byte_offset: usize) -> Option<tree_sitter::Node> {
+    let mut current = root.descendant_for_byte_range(byte_offset, byte_offset)?;
+
+    // Walk up the tree to find a rule, check, or policy node
+    loop {
+        match current.kind() {
+            "rule" | "check" | "policy" => return Some(current),
+            _ => {
+                current = current.parent()?;
+            }
+        }
     }
 }
 
