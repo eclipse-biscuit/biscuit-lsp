@@ -260,40 +260,53 @@ impl Backend {
 
         let text = doc_data.rope.to_string();
         let rope = &doc_data.rope;
+        let mut diagnostics = Vec::new();
 
-        let errors = match parse_source(&text) {
-            Ok(_) => vec![],
-            Err(e) => e,
-        };
+        // 1. Tree-sitter syntax errors (from ERROR nodes)
+        if let Some(ref tree) = doc_data.tree {
+            let ts_errors = get_tree_sitter_errors(tree, rope);
+            diagnostics.extend(ts_errors);
+        }
 
-        let diagnostics = errors
-            .into_iter()
-            .filter_map(|item| {
-                let message = item.message.unwrap_or_else(|| "parse error".to_string());
-                let range = {
-                    let input = item.input.trim();
-                    // the parser sometimes returns an error with an empty message and empty input
-                    if input.is_empty() {
-                        return None;
-                    }
-                    let start = text.offset(input);
-                    let end = start + input.len();
-                    Range::new(
-                        offset_to_position(start, rope).unwrap(),
-                        offset_to_position(end, rope).unwrap(),
-                    )
-                };
-                Some(Diagnostic::new(
-                    range,
-                    Some(DiagnosticSeverity::ERROR),
-                    None,
-                    None,
-                    message,
-                    None,
-                    None,
-                ))
-            })
-            .collect::<Vec<_>>();
+        // 2. Biscuit-auth semantic errors (only if no syntax errors)
+        // This avoids cascading errors from broken syntax
+        if diagnostics.is_empty() {
+            let errors = match parse_source(&text) {
+                Ok(_) => vec![],
+                Err(e) => e,
+            };
+
+            let semantic_diagnostics = errors
+                .into_iter()
+                .filter_map(|item| {
+                    let message = item.message.unwrap_or_else(|| "parse error".to_string());
+                    let range = {
+                        let input = item.input.trim();
+                        // the parser sometimes returns an error with an empty message and empty input
+                        if input.is_empty() {
+                            return None;
+                        }
+                        let start = text.offset(input);
+                        let end = start + input.len();
+                        Range::new(
+                            offset_to_position(start, rope).unwrap(),
+                            offset_to_position(end, rope).unwrap(),
+                        )
+                    };
+                    Some(Diagnostic::new(
+                        range,
+                        Some(DiagnosticSeverity::ERROR),
+                        None,
+                        None,
+                        message,
+                        None,
+                        None,
+                    ))
+                })
+                .collect::<Vec<_>>();
+
+            diagnostics.extend(semantic_diagnostics);
+        }
 
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, Some(version))
@@ -369,6 +382,50 @@ fn find_node_at_cursor(root: tree_sitter::Node, byte_offset: usize) -> tree_sitt
     }
 
     node
+}
+
+/// Extract syntax errors from tree-sitter ERROR nodes
+fn get_tree_sitter_errors(tree: &Tree, rope: &Rope) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let root = tree.root_node();
+
+    // Walk the tree to find ERROR and MISSING nodes
+    visit_node(&root, &mut |node| {
+        if node.is_error() || node.is_missing() {
+            let start = node.start_byte();
+            let end = node.end_byte();
+
+            // Get a meaningful error message
+            let message = if node.is_missing() {
+                format!("Missing: {}", node.kind())
+            } else {
+                // For ERROR nodes, try to show what was expected vs what was found
+                let text_slice = if end > start && (end - start) < 50 {
+                    rope.byte_slice(start..end).to_string()
+                } else {
+                    "<unknown>".to_string()
+                };
+                format!("Syntax error near: {}", text_slice)
+            };
+
+            if let (Some(start_pos), Some(end_pos)) = (
+                offset_to_position(start, rope),
+                offset_to_position(end.max(start + 1), rope),
+            ) {
+                diagnostics.push(Diagnostic::new(
+                    Range::new(start_pos, end_pos),
+                    Some(DiagnosticSeverity::ERROR),
+                    None,
+                    None,
+                    message,
+                    None,
+                    None,
+                ));
+            }
+        }
+    });
+
+    diagnostics
 }
 
 /// Extract fact and rule names from the tree for completion
