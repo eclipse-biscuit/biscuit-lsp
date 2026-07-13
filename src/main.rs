@@ -41,6 +41,7 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
                     ..Default::default()
                 }),
+                definition_provider: Some(OneOf::Left(true)),
                 execute_command_provider: None,
 
                 workspace: Some(WorkspaceServerCapabilities {
@@ -51,7 +52,6 @@ impl LanguageServer for Backend {
                     file_operations: None,
                 }),
                 semantic_tokens_provider: None,
-                definition_provider: None,
                 references_provider: None,
                 rename_provider: None,
                 ..ServerCapabilities::default()
@@ -66,6 +66,58 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let position = params.text_document_position_params.position;
+
+        let doc_data = match self.document_map.get(&uri) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+        let byte_offset = position_to_offset(&position, rope).unwrap_or(0);
+
+        // Find the node at cursor
+        let node = find_node_at_cursor(tree.root_node(), byte_offset);
+
+        // Try to find definition based on node type
+        let location = match node.kind() {
+            "variable" => find_variable_definition(tree.root_node(), &node, byte_offset, rope),
+            "nname" => {
+                // Get the parent to determine arity
+                if let Some(parent) = node.parent() {
+                    find_symbol_definition(tree.root_node(), &node, &parent, rope)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((start, end)) = location {
+            if let (Some(start_pos), Some(end_pos)) = (
+                offset_to_position(start, rope),
+                offset_to_position(end, rope),
+            ) {
+                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: params.text_document_position_params.text_document.uri,
+                    range: Range::new(start_pos, end_pos),
+                })));
+            }
+        }
+
+        Ok(None)
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -626,6 +678,96 @@ fn find_enclosing_context(root: tree_sitter::Node, byte_offset: usize) -> Option
             }
         }
     }
+}
+
+/// Find the definition of a variable (first occurrence in scope)
+fn find_variable_definition(
+    root: tree_sitter::Node,
+    variable_node: &tree_sitter::Node,
+    byte_offset: usize,
+    rope: &Rope,
+) -> Option<(usize, usize)> {
+    // Get the variable name
+    let var_name = rope.byte_slice(variable_node.start_byte()..variable_node.end_byte()).to_string();
+
+    // Find the enclosing context (rule/check/policy)
+    let context = find_enclosing_context(root, byte_offset)?;
+
+    // Find the first occurrence of this variable in the context
+    let mut first_occurrence: Option<(usize, usize)> = None;
+
+    visit_node(&context, &mut |node| {
+        if node.kind() == "variable" {
+            let node_name = rope.byte_slice(node.start_byte()..node.end_byte()).to_string();
+            if node_name == var_name {
+                if let Some((first_start, _)) = first_occurrence {
+                    // Keep the earliest occurrence
+                    if node.start_byte() < first_start {
+                        first_occurrence = Some((node.start_byte(), node.end_byte()));
+                    }
+                } else {
+                    first_occurrence = Some((node.start_byte(), node.end_byte()));
+                }
+            }
+        }
+    });
+
+    first_occurrence
+}
+
+/// Find the definition of a fact or rule by name and arity
+fn find_symbol_definition(
+    root: tree_sitter::Node,
+    name_node: &tree_sitter::Node,
+    parent_node: &tree_sitter::Node,
+    rope: &Rope,
+) -> Option<(usize, usize)> {
+    let name = rope.byte_slice(name_node.start_byte()..name_node.end_byte()).to_string();
+
+    // Determine the arity from the parent node
+    let target_arity = match parent_node.kind() {
+        "fact" => count_fact_arguments(parent_node),
+        "predicate" => count_predicate_arguments(parent_node),
+        _ => return None, // Not a fact or predicate
+    };
+
+    let mut definition: Option<(usize, usize)> = None;
+
+    visit_node(&root, &mut |node| {
+        match node.kind() {
+            "fact" => {
+                // Check if this fact has the matching name and arity
+                if let Some(fact_name_node) = node.child_by_field_name("name").or_else(|| node.child(0)) {
+                    if fact_name_node.kind() == "nname" {
+                        let fact_name = rope.byte_slice(fact_name_node.start_byte()..fact_name_node.end_byte()).to_string();
+                        let fact_arity = count_fact_arguments(node);
+                        if fact_name == name && fact_arity == target_arity {
+                            definition = Some((fact_name_node.start_byte(), fact_name_node.end_byte()));
+                        }
+                    }
+                }
+            }
+            "rule" => {
+                // Check if this rule has the matching name and arity
+                if let Some(head) = node.child_by_field_name("head") {
+                    if head.kind() == "predicate" {
+                        if let Some(rule_name_node) = head.child(0) {
+                            if rule_name_node.kind() == "nname" {
+                                let rule_name = rope.byte_slice(rule_name_node.start_byte()..rule_name_node.end_byte()).to_string();
+                                let rule_arity = count_predicate_arguments(&head);
+                                if rule_name == name && rule_arity == target_arity {
+                                    definition = Some((rule_name_node.start_byte(), rule_name_node.end_byte()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+
+    definition
 }
 
 /// Check if we're in a context where method completion makes sense
