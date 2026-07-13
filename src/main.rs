@@ -11,11 +11,18 @@ use ropey::Rope;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+use tree_sitter::{Parser, Tree};
+
+#[derive(Debug)]
+struct DocumentData {
+    rope: Rope,
+    tree: Option<Tree>,
+}
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
-    document_map: DashMap<String, Rope>,
+    document_map: DashMap<String, DocumentData>,
 }
 
 #[tower_lsp::async_trait]
@@ -27,7 +34,7 @@ impl LanguageServer for Backend {
             capabilities: ServerCapabilities {
                 inlay_hint_provider: None,
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 completion_provider: None,
                 execute_command_provider: None,
@@ -69,13 +76,74 @@ impl LanguageServer for Backend {
         .await
     }
 
-    async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
-        self.on_change(TextDocumentItem {
-            uri: params.text_document.uri,
-            text: std::mem::take(&mut params.content_changes[0].text),
-            version: params.text_document.version,
-        })
-        .await
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let uri = params.text_document.uri.to_string();
+
+        // Get or create document data
+        let mut doc_data = self.document_map.entry(uri.clone()).or_insert_with(|| {
+            DocumentData {
+                rope: Rope::new(),
+                tree: None,
+            }
+        });
+
+        // Apply each change incrementally
+        for change in params.content_changes {
+            if let Some(range) = change.range {
+                // Incremental change
+                let rope = &doc_data.rope;
+
+                // Convert LSP positions to byte offsets
+                let start_byte = position_to_offset(&range.start, rope).unwrap_or(0);
+                let end_byte = position_to_offset(&range.end, rope).unwrap_or(start_byte);
+
+                // Calculate positions for tree-sitter InputEdit
+                let start_position = tree_sitter::Point::new(
+                    range.start.line as usize,
+                    range.start.character as usize,
+                );
+                let old_end_position = tree_sitter::Point::new(
+                    range.end.line as usize,
+                    range.end.character as usize,
+                );
+
+                // Apply edit to rope
+                doc_data.rope.remove(start_byte..end_byte);
+                doc_data.rope.insert(start_byte, &change.text);
+
+                // Calculate new end position after insertion
+                let new_text_len = change.text.len();
+                let new_end_byte = start_byte + new_text_len;
+                let new_end_position = offset_to_point(new_end_byte, &doc_data.rope);
+
+                // Apply edit to tree if it exists
+                if let Some(ref mut tree) = doc_data.tree {
+                    let edit = tree_sitter::InputEdit {
+                        start_byte,
+                        old_end_byte: end_byte,
+                        new_end_byte,
+                        start_position,
+                        old_end_position,
+                        new_end_position,
+                    };
+                    tree.edit(&edit);
+                }
+            } else {
+                // Full document sync (fallback)
+                doc_data.rope = Rope::from_str(&change.text);
+                doc_data.tree = None;
+            }
+        }
+
+        // Reparse with tree-sitter incrementally using chunked parsing
+        let mut parser = Parser::new();
+        parser.set_language(tree_sitter_biscuit::language()).expect("Error loading biscuit grammar");
+        doc_data.tree = parse_rope(&mut parser, &doc_data.rope, doc_data.tree.as_ref());
+
+        drop(doc_data);
+
+        // Run diagnostics
+        self.run_diagnostics(&params.text_document.uri, params.text_document.version).await;
     }
 
     async fn did_save(&self, _: DidSaveTextDocumentParams) {
@@ -116,9 +184,33 @@ struct TextDocumentItem {
 impl Backend {
     async fn on_change(&self, params: TextDocumentItem) {
         let rope = ropey::Rope::from_str(&params.text);
-        self.document_map
-            .insert(params.uri.to_string(), rope.clone());
-        let errors = match parse_source(&params.text) {
+
+        // Parse with tree-sitter
+        let mut parser = Parser::new();
+        parser.set_language(tree_sitter_biscuit::language()).expect("Error loading biscuit grammar");
+        let tree = parser.parse(&params.text, None);
+
+        self.document_map.insert(
+            params.uri.to_string(),
+            DocumentData {
+                rope: rope.clone(),
+                tree,
+            },
+        );
+
+        self.run_diagnostics(&params.uri, params.version).await;
+    }
+
+    async fn run_diagnostics(&self, uri: &Url, version: i32) {
+        let doc_data = match self.document_map.get(&uri.to_string()) {
+            Some(data) => data,
+            None => return,
+        };
+
+        let text = doc_data.rope.to_string();
+        let rope = &doc_data.rope;
+
+        let errors = match parse_source(&text) {
             Ok(_) => vec![],
             Err(e) => e,
         };
@@ -133,11 +225,11 @@ impl Backend {
                     if input.is_empty() {
                         return None;
                     }
-                    let start = &params.text.offset(input);
+                    let start = text.offset(input);
                     let end = start + input.len();
                     Range::new(
-                        offset_to_position(*start, &rope).unwrap(),
-                        offset_to_position(end, &rope).unwrap(),
+                        offset_to_position(start, rope).unwrap(),
+                        offset_to_position(end, rope).unwrap(),
                     )
                 };
                 Some(Diagnostic::new(
@@ -153,7 +245,7 @@ impl Backend {
             .collect::<Vec<_>>();
 
         self.client
-            .publish_diagnostics(params.uri.clone(), diagnostics, Some(params.version))
+            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
             .await;
     }
 }
@@ -180,4 +272,253 @@ fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
     let first_char_of_line = rope.try_line_to_char(line).ok()?;
     let column = offset - first_char_of_line;
     Some(Position::new(line as u32, column as u32))
+}
+
+fn position_to_offset(position: &Position, rope: &Rope) -> Option<usize> {
+    let line = position.line as usize;
+    let character = position.character as usize;
+    let line_start = rope.try_line_to_char(line).ok()?;
+    Some(line_start + character)
+}
+
+fn offset_to_point(offset: usize, rope: &Rope) -> tree_sitter::Point {
+    let line = rope.try_char_to_line(offset).unwrap_or(0);
+    let line_start = rope.try_line_to_char(line).unwrap_or(0);
+    let column = offset.saturating_sub(line_start);
+    tree_sitter::Point::new(line, column)
+}
+
+/// Parse a Rope with tree-sitter using chunked callbacks to avoid allocating the full text
+fn parse_rope(parser: &mut Parser, rope: &Rope, old_tree: Option<&Tree>) -> Option<Tree> {
+    parser.parse_with(
+        &mut |byte_offset, _point| {
+            // Return a chunk of bytes starting from byte_offset
+            // tree-sitter will call this callback multiple times to get the text in chunks
+            if byte_offset >= rope.len_bytes() {
+                return "";
+            }
+            let slice = rope.byte_slice(byte_offset..);
+            // Get the first chunk from the rope slice
+            // This avoids allocating a full string - we return a reference to ropey's internal buffer
+            slice.chunks().next().unwrap_or("")
+        },
+        old_tree,
+    )
+}
+
+/// Find the most specific node at the cursor position
+/// Falls back to parent if cursor is in ERROR or MISSING node
+fn find_node_at_cursor(root: tree_sitter::Node, byte_offset: usize) -> tree_sitter::Node {
+    let mut node = root.descendant_for_byte_range(byte_offset, byte_offset)
+        .unwrap_or(root);
+
+    // If we're in an ERROR or MISSING node, try to use the parent for better context
+    while (node.is_error() || node.is_missing()) && node.parent().is_some() {
+        node = node.parent().unwrap();
+    }
+
+    node
+}
+
+/// Extract fact and rule names from the tree for completion
+fn get_symbol_completions(tree: &Tree, rope: &Rope) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    let root = tree.root_node();
+
+    // Walk the tree to find all facts and rules
+    visit_node(&root, &mut |node| {
+        match node.kind() {
+            "fact" => {
+                // Facts have structure: nname "(" fact_term, ... ")"
+                if let Some(name_node) = node.child_by_field_name("name").or_else(|| node.child(0)) {
+                    if name_node.kind() == "nname" {
+                        let start = name_node.start_byte();
+                        let end = name_node.end_byte();
+                        let name = rope.byte_slice(start..end).to_string();
+                        items.push(CompletionItem {
+                            label: name.clone(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            detail: Some(format!("Fact: {}", name)),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            "rule" => {
+                // Rules have structure: head "<-" body
+                if let Some(head) = node.child_by_field_name("head") {
+                    if head.kind() == "predicate" {
+                        // Predicates have structure: nname "(" term, ... ")"
+                        if let Some(name_node) = head.child(0) {
+                            if name_node.kind() == "nname" {
+                                let start = name_node.start_byte();
+                                let end = name_node.end_byte();
+                                let name = rope.byte_slice(start..end).to_string();
+                                items.push(CompletionItem {
+                                    label: name.clone(),
+                                    kind: Some(CompletionItemKind::FUNCTION),
+                                    detail: Some(format!("Rule: {}", name)),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+
+    items
+}
+
+/// Visit all nodes in the tree recursively
+fn visit_node<F>(node: &tree_sitter::Node, visitor: &mut F)
+where
+    F: FnMut(&tree_sitter::Node),
+{
+    visitor(node);
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        visit_node(&child, visitor);
+    }
+}
+
+/// Check if we're in a context where method completion makes sense
+fn is_in_method_context(node: tree_sitter::Node, byte_offset: usize, rope: &Rope) -> bool {
+    // Check if we're inside a methods node
+    let mut current = node;
+    loop {
+        if current.kind() == "methods" {
+            return true;
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+
+    // Check if the previous character is a dot
+    if byte_offset > 0 {
+        let prev_char = rope.byte_slice((byte_offset - 1)..byte_offset);
+        if prev_char == "." {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Get hardcoded method completions for biscuit built-in methods
+/// Source: biscuit-rust/biscuit-parser/src/parser.rs
+fn get_method_completions() -> Vec<CompletionItem> {
+    vec![
+        // Binary methods (take an argument) - cursor between parens
+        CompletionItem {
+            label: "contains".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Check if string/array/set contains element".to_string()),
+            insert_text: Some("contains($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "starts_with".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Check if string starts with prefix".to_string()),
+            insert_text: Some("starts_with($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "ends_with".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Check if string ends with suffix".to_string()),
+            insert_text: Some("ends_with($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "matches".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Check if string matches regex pattern".to_string()),
+            insert_text: Some("matches($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "intersection".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Get intersection of two sets".to_string()),
+            insert_text: Some("intersection($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "union".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Get union of two sets".to_string()),
+            insert_text: Some("union($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "all".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Check if all elements satisfy a condition (closure)".to_string()),
+            insert_text: Some("all($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "any".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Check if any element satisfies a condition (closure)".to_string()),
+            insert_text: Some("any($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "get".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Get element from array/map".to_string()),
+            insert_text: Some("get($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "try_or".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Try operation or return fallback value".to_string()),
+            insert_text: Some("try_or($0)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        // Unary methods (no argument) - cursor after parens
+        CompletionItem {
+            label: "length".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Get length of string/array/set".to_string()),
+            insert_text: Some("length()$0".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "type".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Get type of value".to_string()),
+            insert_text: Some("type()$0".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        // External function call - cursor after :: to type function name
+        CompletionItem {
+            label: "extern::".to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some("Call external function (FFI)".to_string()),
+            insert_text: Some("extern::$0()".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+    ]
 }
