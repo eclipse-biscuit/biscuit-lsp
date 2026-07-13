@@ -36,7 +36,11 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::INCREMENTAL,
                 )),
-                completion_provider: None,
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+                    ..Default::default()
+                }),
                 execute_command_provider: None,
 
                 workspace: Some(WorkspaceServerCapabilities {
@@ -62,6 +66,53 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+
+        let doc_data = match self.document_map.get(&uri) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        // Convert position to byte offset
+        let byte_offset = position_to_offset(&position, &doc_data.rope).unwrap_or(0);
+
+        // Find the node at cursor and extract data before dropping tree reference
+        let (node_kind, in_method_context) = {
+            let node = find_node_at_cursor(tree.root_node(), byte_offset);
+            let node_kind = node.kind().to_string();
+            let in_method_context = is_in_method_context(node, byte_offset, &doc_data.rope);
+            (node_kind, in_method_context)
+        };
+
+        // Get completions from multiple sources
+        let mut items = Vec::new();
+
+        // 1. Symbol-based completions (fact and rule names)
+        let symbol_items = get_symbol_completions(tree, &doc_data.rope);
+        items.extend(symbol_items);
+
+        // 2. Method completions (if we're in a method call context)
+        if in_method_context {
+            items.extend(get_method_completions());
+        }
+
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("Completion at byte {} in node kind: {:?}, found {} items", byte_offset, node_kind, items.len()),
+            )
+            .await;
+
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
