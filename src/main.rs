@@ -116,6 +116,21 @@ impl LanguageServer for Backend {
         // 5. Convert parameter to literal
         actions.extend(code_actions::create_convert_parameter_to_literal_actions(&node, rope, &params.text_document.uri));
 
+        // 6. Extract rule
+        if let Some(action) = code_actions::create_extract_rule_action(&node, rope, &params.text_document.uri) {
+            actions.push(action);
+        }
+
+        // 7. Inline rule
+        if let Some(action) = code_actions::create_inline_rule_action(&node, rope, &params.text_document.uri, tree.root_node()) {
+            actions.push(action);
+        }
+
+        // 8. Sort rule body
+        if let Some(action) = code_actions::create_sort_rule_body_action(&node, rope, &params.text_document.uri) {
+            actions.push(action);
+        }
+
         if actions.is_empty() {
             Ok(None)
         } else {
