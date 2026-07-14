@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+mod ast;
 mod code_actions;
 
 use nom::Offset;
@@ -117,7 +118,7 @@ impl LanguageServer for Backend {
         actions.extend(code_actions::create_convert_parameter_to_literal_actions(&node, rope, &params.text_document.uri));
 
         // 6. Extract rule
-        if let Some(action) = code_actions::create_extract_rule_action(&node, rope, &params.text_document.uri) {
+        if let Some(action) = code_actions::create_extract_rule_action(&node, rope, &params.text_document.uri, tree.root_node()) {
             actions.push(action);
         }
 

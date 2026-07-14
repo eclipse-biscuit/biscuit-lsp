@@ -7,8 +7,9 @@
 use ropey::Rope;
 use tower_lsp::lsp_types::*;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
+use crate::ast::{self, RuleBodyItemKind};
 use crate::offset_to_position;
 
 /// Create code action to add a trusting clause to a rule/check/policy
@@ -18,40 +19,10 @@ pub fn create_add_trusting_clause_action(
     uri: &Url,
 ) -> Option<CodeActionOrCommand> {
     // Find the enclosing rule/check/policy
-    let mut current = *node;
-    loop {
-        match current.kind() {
-            "rule" | "check" | "policy" => break,
-            _ => {
-                current = current.parent()?;
-            }
-        }
-    }
+    let current = ast::find_enclosing_statement(node)?;
 
-    // Check if it already has a trusting clause by looking for origin_clause
-    // The origin_clause is a child of rule_body, not a direct child of rule/check/policy
-    let has_trusting = {
-        let mut has_it = false;
-        let mut cursor = current.walk();
-        for child in current.children(&mut cursor) {
-            if child.kind() == "rule_body" {
-                // Look inside rule_body for origin_clause
-                let mut body_cursor = child.walk();
-                for body_child in child.children(&mut body_cursor) {
-                    if body_child.kind() == "origin_clause" {
-                        has_it = true;
-                        break;
-                    }
-                }
-            }
-            if has_it {
-                break;
-            }
-        }
-        has_it
-    };
-
-    if has_trusting {
+    // Check if it already has a trusting clause
+    if ast::has_origin_clause(&current) {
         return None; // Already has trusting clause
     }
 
@@ -71,9 +42,9 @@ pub fn create_add_trusting_clause_action(
 
     let insert_pos = offset_to_position(insert_position, rope)?;
 
-    // Create two variants: trusting authority and trusting previous
-    let mut changes_authority = std::collections::HashMap::new();
-    changes_authority.insert(
+    // Create trusting authority clause
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
         uri.clone(),
         vec![TextEdit {
             range: Range::new(insert_pos, insert_pos),
@@ -81,23 +52,12 @@ pub fn create_add_trusting_clause_action(
         }],
     );
 
-    let mut changes_previous = std::collections::HashMap::new();
-    changes_previous.insert(
-        uri.clone(),
-        vec![TextEdit {
-            range: Range::new(insert_pos, insert_pos),
-            new_text: " trusting previous".to_string(),
-        }],
-    );
-
-    // Return both as separate actions
-    // For now, return the authority one (we can make this a menu later)
     Some(CodeActionOrCommand::CodeAction(CodeAction {
         title: "Add trusting clause (authority)".to_string(),
         kind: Some(CodeActionKind::REFACTOR),
         diagnostics: None,
         edit: Some(WorkspaceEdit {
-            changes: Some(changes_authority),
+            changes: Some(changes),
             ..Default::default()
         }),
         command: None,
@@ -115,28 +75,25 @@ pub fn create_convert_check_variant_actions(
     uri: &Url,
 ) -> Vec<CodeActionOrCommand> {
     // Find the enclosing check
-    let mut current = *node;
-    loop {
-        match current.kind() {
-            "check" => break,
-            _ => {
-                match current.parent() {
-                    Some(parent) => current = parent,
-                    None => return Vec::new(),
-                }
-            }
-        }
-    }
+    let current = match ast::find_enclosing_statement(node) {
+        Some(node) if node.kind() == "check" => node,
+        _ => return Vec::new(),
+    };
 
-    // The text of the check should start with "check if", "check all", or "reject if"
+    // Extract the check variant by examining the check text
+    // The grammar defines: choice("check if", "check all", "reject if")
+    // We need to find which variant this is by looking at the beginning of the node
     let start_byte = current.start_byte();
-    let check_text = rope.byte_slice(start_byte..current.end_byte()).to_string();
 
-    let current_variant = if check_text.starts_with("check if") {
+    // Look at first ~12 bytes to determine variant (longest is "reject if" = 9 chars)
+    let sample_end = (start_byte + 12).min(current.end_byte());
+    let check_prefix = rope.byte_slice(start_byte..sample_end).to_string().trim().to_lowercase();
+
+    let current_variant = if check_prefix.starts_with("check if") {
         "check if"
-    } else if check_text.starts_with("check all") {
+    } else if check_prefix.starts_with("check all") {
         "check all"
-    } else if check_text.starts_with("reject if") {
+    } else if check_prefix.starts_with("reject if") {
         "reject if"
     } else {
         return Vec::new();
@@ -198,26 +155,22 @@ pub fn create_convert_policy_type_actions(
     uri: &Url,
 ) -> Vec<CodeActionOrCommand> {
     // Find the enclosing policy
-    let mut current = *node;
-    loop {
-        match current.kind() {
-            "policy" => break,
-            _ => {
-                match current.parent() {
-                    Some(parent) => current = parent,
-                    None => return Vec::new(),
-                }
-            }
-        }
-    }
+    let current = match ast::find_enclosing_statement(node) {
+        Some(node) if node.kind() == "policy" => node,
+        _ => return Vec::new(),
+    };
 
-    // The text of the policy should start with "allow if" or "deny if"
+    // Extract the policy type by examining the policy text
+    // The grammar defines: choice("allow if", "deny if")
     let start_byte = current.start_byte();
-    let policy_text = rope.byte_slice(start_byte..current.end_byte()).to_string();
 
-    let (current_type, target_type) = if policy_text.starts_with("allow if") {
+    // Look at first ~10 bytes to determine type (longest is "allow if" = 8 chars)
+    let sample_end = (start_byte + 10).min(current.end_byte());
+    let policy_prefix = rope.byte_slice(start_byte..sample_end).to_string().trim().to_lowercase();
+
+    let (current_type, target_type) = if policy_prefix.starts_with("allow if") {
         ("allow if", "deny if")
-    } else if policy_text.starts_with("deny if") {
+    } else if policy_prefix.starts_with("deny if") {
         ("deny if", "allow if")
     } else {
         return Vec::new();
@@ -323,16 +276,16 @@ pub fn create_convert_to_parameter_action(
     _start_offset: usize,
     _end_offset: usize,
 ) -> Option<CodeActionOrCommand> {
-    // Check if cursor is on a literal value (string, number, boolean, date, bytes)
-    let target_node = match node.kind() {
-        "string" | "number" | "boolean" | "date" | "bytes" => *node,
-        _ => {
-            // Try parent
-            let parent = node.parent()?;
-            match parent.kind() {
-                "string" | "number" | "boolean" | "date" | "bytes" => parent,
-                _ => return None,
-            }
+    // Check if cursor is on a literal value
+    let target_node = if ast::is_literal(node) {
+        *node
+    } else {
+        // Try parent
+        let parent = node.parent()?;
+        if ast::is_literal(&parent) {
+            parent
+        } else {
+            return None;
         }
     };
 
@@ -362,8 +315,15 @@ pub fn create_convert_to_parameter_action(
         }],
     );
 
+    // Truncate value for display (max 30 chars)
+    let display_value = if value.len() > 30 {
+        format!("{}...", value.chars().take(27).collect::<String>())
+    } else {
+        value
+    };
+
     Some(CodeActionOrCommand::CodeAction(CodeAction {
-        title: format!("Convert '{}' to parameter", value),
+        title: format!("Convert '{}' to parameter", display_value),
         kind: Some(CodeActionKind::REFACTOR),
         diagnostics: None,
         edit: Some(WorkspaceEdit {
@@ -382,38 +342,29 @@ pub fn create_extract_rule_action(
     node: &tree_sitter::Node,
     rope: &Rope,
     uri: &Url,
+    root: tree_sitter::Node,
 ) -> Option<CodeActionOrCommand> {
     // Find the enclosing check or policy
-    let mut current = *node;
-    let parent_kind = loop {
-        match current.kind() {
-            "check" | "policy" => break current.kind(),
-            _ => {
-                current = current.parent()?;
-            }
-        }
-    };
+    let current = ast::find_enclosing_statement(node)?;
+    let parent_kind = current.kind();
 
-    // Find the rule_body
-    let mut rule_body = None;
-    let mut cursor = current.walk();
-    for child in current.children(&mut cursor) {
-        if child.kind() == "rule_body" {
-            rule_body = Some(child);
-            break;
-        }
+    if parent_kind != "check" && parent_kind != "policy" {
+        return None;
     }
 
-    let rule_body_node = rule_body?;
+    // Find the rule_body
+    let rule_body_node = ast::find_enclosing_rule_body(node)?;
     let body_start = rule_body_node.start_byte();
     let body_end = rule_body_node.end_byte();
     let body_text = rope.byte_slice(body_start..body_end).to_string();
 
     // Extract all variables from the rule body
-    let variables = extract_variables_from_node(&rule_body_node, rope);
+    let variables = ast::extract_variables(&rule_body_node, rope);
 
-    // Generate rule signature
-    let rule_name = "extracted_rule";
+    // Generate unique rule name
+    let existing_names = ast::collect_all_rule_names(&root, rope);
+    let rule_name = ast::generate_unique_name(&existing_names, "extracted_rule");
+
     let params = if variables.is_empty() {
         String::new()
     } else {
@@ -470,27 +421,6 @@ pub fn create_extract_rule_action(
     }))
 }
 
-/// Extract all variables from a tree-sitter node
-fn extract_variables_from_node(node: &tree_sitter::Node, rope: &Rope) -> HashSet<String> {
-    let mut variables = HashSet::new();
-    visit_node_for_variables(node, rope, &mut variables);
-    variables
-}
-
-/// Recursively visit nodes to collect variables
-fn visit_node_for_variables(node: &tree_sitter::Node, rope: &Rope, variables: &mut HashSet<String>) {
-    if node.kind() == "variable" {
-        let start = node.start_byte();
-        let end = node.end_byte();
-        let var_text = rope.byte_slice(start..end).to_string();
-        variables.insert(var_text);
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        visit_node_for_variables(&child, rope, variables);
-    }
-}
 
 /// Create code action to inline a rule call
 pub fn create_inline_rule_action(
@@ -500,49 +430,38 @@ pub fn create_inline_rule_action(
     root: tree_sitter::Node,
 ) -> Option<CodeActionOrCommand> {
     // Find if we're on a predicate
-    let mut current = *node;
-    let predicate_node = loop {
-        if current.kind() == "predicate" {
-            break current;
-        }
-        current = current.parent()?;
-    };
+    let predicate_node = ast::find_enclosing_predicate(node)?;
 
     // Get predicate name and arity
-    let name_node = predicate_node.child(0)?;
-    if name_node.kind() != "nname" {
-        return None;
-    }
-
-    let pred_name = rope
-        .byte_slice(name_node.start_byte()..name_node.end_byte())
-        .to_string();
-
-    // Count arguments
-    let arity = count_predicate_arguments(&predicate_node, rope);
+    let pred_name = ast::extract_predicate_name(&predicate_node, rope)?;
+    let arity = ast::count_predicate_arity(&predicate_node);
 
     // Find the rule definition with matching name and arity
-    let rule_def = find_rule_definition(&root, &pred_name, arity, rope)?;
+    let rule_def = ast::find_rule_by_name_and_arity(&root, &pred_name, arity, rope)?;
 
     // Get rule head parameters
     let rule_head = rule_def.child_by_field_name("head")?;
-    let rule_params = extract_predicate_parameters(&rule_head, rope);
+    let rule_params = ast::extract_predicate_parameters(&rule_head, rope);
 
     // Get call arguments
-    let call_args = extract_predicate_parameters(&predicate_node, rope);
+    let call_args = ast::extract_predicate_parameters(&predicate_node, rope);
+
+    // Check arity match
+    if rule_params.len() != call_args.len() {
+        return None; // Arity mismatch, can't inline safely
+    }
 
     // Get rule body
     let rule_body = rule_def.child_by_field_name("body")?;
-    let body_text = rope
-        .byte_slice(rule_body.start_byte()..rule_body.end_byte())
-        .to_string();
 
-    // Perform variable substitution
-    let mut inlined_body = body_text.clone();
+    // Build parameter substitution map
+    let mut subst_map = HashMap::new();
     for (param, arg) in rule_params.iter().zip(call_args.iter()) {
-        // Replace all occurrences of param with arg in the body
-        inlined_body = inlined_body.replace(param, arg);
+        subst_map.insert(param.clone(), arg.clone());
     }
+
+    // Perform AST-based variable substitution
+    let inlined_body = ast::substitute_variables(&rule_body, rope, &subst_map);
 
     // Replace the predicate with the inlined body
     let pred_start = predicate_node.start_byte();
@@ -574,82 +493,6 @@ pub fn create_inline_rule_action(
     }))
 }
 
-/// Count arguments in a predicate
-fn count_predicate_arguments(predicate_node: &tree_sitter::Node, _rope: &Rope) -> usize {
-    let mut count = 0;
-    let mut cursor = predicate_node.walk();
-    for child in predicate_node.children(&mut cursor) {
-        if child.kind() == "term" {
-            count += 1;
-        }
-    }
-    count
-}
-
-/// Find a rule definition by name and arity
-fn find_rule_definition<'a>(
-    root: &tree_sitter::Node<'a>,
-    name: &str,
-    arity: usize,
-    rope: &Rope,
-) -> Option<tree_sitter::Node<'a>> {
-    // Store the byte range instead of the node
-    let mut result_range: Option<(usize, usize)> = None;
-    visit_node_simple(root, &mut |node| {
-        if result_range.is_some() {
-            return; // Already found
-        }
-        if node.kind() == "rule" {
-            if let Some(head) = node.child_by_field_name("head") {
-                if head.kind() == "predicate" {
-                    if let Some(name_node) = head.child(0) {
-                        if name_node.kind() == "nname" {
-                            let rule_name = rope
-                                .byte_slice(name_node.start_byte()..name_node.end_byte())
-                                .to_string();
-                            let rule_arity = count_predicate_arguments(&head, rope);
-                            if rule_name == name && rule_arity == arity {
-                                result_range = Some((node.start_byte(), node.end_byte()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    // Reconstruct the node from the byte range
-    if let Some((start, end)) = result_range {
-        root.descendant_for_byte_range(start, end)
-    } else {
-        None
-    }
-}
-
-/// Extract parameters from a predicate (as strings)
-fn extract_predicate_parameters(predicate_node: &tree_sitter::Node, rope: &Rope) -> Vec<String> {
-    let mut params = Vec::new();
-    let mut cursor = predicate_node.walk();
-    for child in predicate_node.children(&mut cursor) {
-        if child.kind() == "term" {
-            let param_text = rope.byte_slice(child.start_byte()..child.end_byte()).to_string();
-            params.push(param_text);
-        }
-    }
-    params
-}
-
-/// Visit all nodes recursively (simple version)
-fn visit_node_simple<F>(node: &tree_sitter::Node, visitor: &mut F)
-where
-    F: FnMut(&tree_sitter::Node),
-{
-    visitor(node);
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        visit_node_simple(&child, visitor);
-    }
-}
 
 /// Create code action to sort a rule body
 pub fn create_sort_rule_body_action(
@@ -658,37 +501,13 @@ pub fn create_sort_rule_body_action(
     uri: &Url,
 ) -> Option<CodeActionOrCommand> {
     // Find the enclosing rule, check, or policy
-    let mut current = *node;
-    loop {
-        match current.kind() {
-            "rule" | "check" | "policy" => break,
-            _ => {
-                current = current.parent()?;
-            }
-        }
-    }
+    let _statement = ast::find_enclosing_statement(node)?;
 
-    // Find the first rule_body
-    let mut rule_body_node = None;
-    let mut cursor = current.walk();
-    for child in current.children(&mut cursor) {
-        if child.kind() == "rule_body" {
-            rule_body_node = Some(child);
-            break;
-        }
-    }
-
-    let body_node = rule_body_node?;
+    // Find the rule_body
+    let body_node = ast::find_enclosing_rule_body(node)?;
 
     // Extract all predicates and expressions from the body
-    let mut items: Vec<(String, usize, usize)> = Vec::new(); // (text, start, end)
-    let mut body_cursor = body_node.walk();
-    for child in body_node.children(&mut body_cursor) {
-        if child.kind() == "predicate" || child.kind() == "expression" {
-            let text = rope.byte_slice(child.start_byte()..child.end_byte()).to_string();
-            items.push((text, child.start_byte(), child.end_byte()));
-        }
-    }
+    let items = ast::extract_rule_body_items(&body_node, rope);
 
     if items.len() <= 1 {
         return None; // Nothing to sort
@@ -697,32 +516,28 @@ pub fn create_sort_rule_body_action(
     // Sort items: predicates before expressions, then alphabetically
     let mut sorted_items = items.clone();
     sorted_items.sort_by(|a, b| {
-        // Determine if item is predicate or expression
-        let a_is_pred = !a.0.contains("==") && !a.0.contains("!=") && !a.0.contains('>') && !a.0.contains('<');
-        let b_is_pred = !b.0.contains("==") && !b.0.contains("!=") && !b.0.contains('>') && !b.0.contains('<');
-
-        match (a_is_pred, b_is_pred) {
-            (true, false) => std::cmp::Ordering::Less,    // predicates before expressions
-            (false, true) => std::cmp::Ordering::Greater, // expressions after predicates
-            _ => a.0.cmp(&b.0),                           // alphabetical within same type
+        match (a.kind, b.kind) {
+            (RuleBodyItemKind::Predicate, RuleBodyItemKind::Expression) => std::cmp::Ordering::Less,
+            (RuleBodyItemKind::Expression, RuleBodyItemKind::Predicate) => std::cmp::Ordering::Greater,
+            _ => a.text.cmp(&b.text),
         }
     });
 
     // Check if already sorted
-    if items.iter().map(|i| &i.0).eq(sorted_items.iter().map(|i| &i.0)) {
+    if items.iter().map(|i| &i.text).eq(sorted_items.iter().map(|i| &i.text)) {
         return None; // Already sorted
     }
 
-    // Build the sorted text
+    // Build the sorted text with proper separators
     let sorted_text = sorted_items
         .iter()
-        .map(|i| i.0.clone())
+        .map(|i| i.text.clone())
         .collect::<Vec<_>>()
         .join(", ");
 
     // Find the range of all items
-    let start = items.iter().map(|i| i.1).min()?;
-    let end = items.iter().map(|i| i.2).max()?;
+    let start = items.iter().map(|i| i.start).min()?;
+    let end = items.iter().map(|i| i.end).max()?;
 
     let start_pos = offset_to_position(start, rope)?;
     let end_pos = offset_to_position(end, rope)?;
