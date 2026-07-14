@@ -15,8 +15,11 @@ serde = { version = "1.0", features = ["derive"] }
 dashmap = "5.1.0"
 log = "0.4.14"
 im-rc = "15.0.0"
-biscuit-auth = "3.2.0"
+biscuit-auth = "6.0.0"
 nom = "7.1.3"
 oxc_index = "0.36.0"
+tree-sitter = "~0.20.3"
+tree-sitter-biscuit = { git = "https://github.com/eclipse-biscuit/tree-sitter-biscuit", rev = "bafc5e9a0b251bd1568a707d3584251b059a214c" }
+chrono = "0.4"
 
 
