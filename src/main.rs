@@ -3,6 +3,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+mod tree_sitter;
+
 use nom::Offset;
 
 use biscuit_auth::parser::parse_source;
@@ -12,10 +14,12 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use tree_sitter::DocumentData;
+
 #[derive(Debug)]
 struct Backend {
     client: Client,
-    document_map: DashMap<String, Rope>,
+    document_map: DashMap<String, DocumentData>,
 }
 
 #[tower_lsp::async_trait]
@@ -61,21 +65,21 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "file opened!")
             .await;
-        self.on_change(TextDocumentItem {
-            uri: params.text_document.uri,
-            text: params.text_document.text,
-            version: params.text_document.version,
-        })
-        .await
+        self.on_change(
+            params.text_document.uri,
+            params.text_document.text,
+            params.text_document.version,
+        )
+        .await;
     }
 
     async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
-        self.on_change(TextDocumentItem {
-            uri: params.text_document.uri,
-            text: std::mem::take(&mut params.content_changes[0].text),
-            version: params.text_document.version,
-        })
-        .await
+        self.on_change(
+            params.text_document.uri,
+            std::mem::take(&mut params.content_changes[0].text),
+            params.text_document.version,
+        )
+        .await;
     }
 
     async fn did_save(&self, _: DidSaveTextDocumentParams) {
@@ -108,52 +112,73 @@ impl LanguageServer for Backend {
     }
 }
 
-struct TextDocumentItem {
-    uri: Url,
-    text: String,
-    version: i32,
-}
 impl Backend {
-    async fn on_change(&self, params: TextDocumentItem) {
-        let rope = ropey::Rope::from_str(&params.text);
-        self.document_map
-            .insert(params.uri.to_string(), rope.clone());
-        let errors = match parse_source(&params.text) {
-            Ok(_) => vec![],
-            Err(e) => e,
+    /// Handle a new document or full document replacement
+    async fn on_change(&self, uri: Url, text: String, version: i32) {
+        // Create document data from full text
+        let doc_data = DocumentData::from_text(&text);
+        self.document_map.insert(uri.to_string(), doc_data);
+
+        // Run diagnostics
+        self.run_diagnostics(&uri, version).await;
+    }
+
+    async fn run_diagnostics(&self, uri: &Url, version: i32) {
+        let doc_data = match self.document_map.get(&uri.to_string()) {
+            Some(data) => data,
+            None => return,
         };
 
-        let diagnostics = errors
-            .into_iter()
-            .filter_map(|item| {
-                let message = item.message.unwrap_or_else(|| "parse error".to_string());
-                let range = {
-                    let input = item.input.trim();
-                    // the parser sometimes returns an error with an empty message and empty input
-                    if input.is_empty() {
-                        return None;
-                    }
-                    let start = &params.text.offset(input);
-                    let end = start + input.len();
-                    Range::new(
-                        offset_to_position(*start, &rope).unwrap(),
-                        offset_to_position(end, &rope).unwrap(),
-                    )
-                };
-                Some(Diagnostic::new(
-                    range,
-                    Some(DiagnosticSeverity::ERROR),
-                    None,
-                    None,
-                    message,
-                    None,
-                    None,
-                ))
-            })
-            .collect::<Vec<_>>();
+        let text = doc_data.rope.to_string();
+        let rope = &doc_data.rope;
+
+        let mut diagnostics = Vec::new();
+
+        // 1. Tree-sitter syntax errors (from ERROR nodes)
+        diagnostics.extend(doc_data.get_syntax_errors());
+
+        // 2. Biscuit-auth semantic errors (only if no syntax errors)
+        // This avoids cascading errors from broken syntax
+        if diagnostics.is_empty() {
+            let errors = match parse_source(&text) {
+                Ok(_) => vec![],
+                Err(e) => e,
+            };
+
+            let semantic_diagnostics = errors
+                .into_iter()
+                .filter_map(|item| {
+                    let message = item.message.unwrap_or_else(|| "parse error".to_string());
+                    let range = {
+                        let input = item.input.trim();
+                        // the parser sometimes returns an error with an empty message and empty input
+                        if input.is_empty() {
+                            return None;
+                        }
+                        let start = text.offset(input);
+                        let end = start + input.len();
+                        Range::new(
+                            offset_to_position(start, rope).unwrap(),
+                            offset_to_position(end, rope).unwrap(),
+                        )
+                    };
+                    Some(Diagnostic::new(
+                        range,
+                        Some(DiagnosticSeverity::ERROR),
+                        None,
+                        None,
+                        message,
+                        None,
+                        None,
+                    ))
+                })
+                .collect::<Vec<_>>();
+
+            diagnostics.extend(semantic_diagnostics);
+        }
 
         self.client
-            .publish_diagnostics(params.uri.clone(), diagnostics, Some(params.version))
+            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
             .await;
     }
 }
