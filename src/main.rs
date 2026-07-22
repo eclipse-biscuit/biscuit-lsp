@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+mod completion;
 mod tree_sitter;
 
 use nom::Offset;
@@ -33,7 +34,11 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
-                completion_provider: None,
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 execute_command_provider: None,
 
                 workspace: Some(WorkspaceServerCapabilities {
@@ -59,6 +64,29 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+
+        let doc_data = match self.document_map.get(&uri) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        // Convert position to byte offset
+        let byte_offset = tree_sitter::position_to_offset(&position, &doc_data.rope).unwrap_or(0);
+
+        // Get completions
+        let items = completion::get_completions(tree, &doc_data.rope, byte_offset);
+
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
