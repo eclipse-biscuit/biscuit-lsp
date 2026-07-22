@@ -36,7 +36,6 @@ impl DocumentData {
         Self { rope, tree }
     }
 
-
     /// Get tree-sitter syntax errors
     pub fn get_syntax_errors(&self) -> Vec<Diagnostic> {
         match &self.tree {
