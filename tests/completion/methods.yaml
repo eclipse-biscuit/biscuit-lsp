@@ -1,0 +1,40 @@
+title: Methods suggested after dot
+input: |
+  check if $x.|
+completions:
+  contains:
+    - label: contains
+      kind: METHOD
+    - label: length
+      kind: METHOD
+    - label: starts_with
+      kind: METHOD
+  not_contains:
+    - kind: KEYWORD
+    - kind: FUNCTION
+---
+title: Methods suggested inside method call
+input: |
+  check if $x.contains|("foo");
+completions:
+  contains:
+    - kind: METHOD
+  not_contains:
+    - kind: KEYWORD
+---
+title: No methods in regular predicate context
+input: |
+  check if user($u|);
+completions:
+  not_contains:
+    - kind: METHOD
+---
+title: Methods after string literal
+input: |
+  check if "test".|
+completions:
+  contains:
+    - label: length
+      kind: METHOD
+    - label: starts_with
+      kind: METHOD

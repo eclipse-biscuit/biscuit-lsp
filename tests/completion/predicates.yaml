@@ -1,0 +1,30 @@
+title: Predicates shown when not typing variable
+input: |
+  check if user($u);
+  fact("test");
+  check if |user
+completions:
+  contains:
+    - kind: FUNCTION
+  not_contains:
+    - kind: VARIABLE
+---
+title: Only predicates when typing predicate name
+input: |
+  foo(true);
+  bar($) <- foo($foobar), |
+completions:
+  contains:
+    - kind: FUNCTION
+  not_contains:
+    - kind: VARIABLE
+---
+title: Predicates suggested in rule body
+input: |
+  foo(true);
+  bar($x) <- |
+completions:
+  contains:
+    - label: "foo/1"
+      kind: FUNCTION
+    - kind: KEYWORD
