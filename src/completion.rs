@@ -9,6 +9,7 @@
 use ropey::Rope;
 use tower_lsp::lsp_types::*;
 
+use crate::ast::{detect_valid_insertions, Insertion, KEYWORDS};
 use crate::tree_sitter;
 
 /// Get completions for the given position
@@ -17,18 +18,33 @@ pub fn get_completions(
     rope: &Rope,
     byte_offset: usize,
 ) -> Vec<CompletionItem> {
-    let node = tree_sitter::find_node_at_cursor(tree.root_node(), byte_offset);
+    let valid_insertions = detect_valid_insertions(tree, rope, byte_offset);
 
-    if tree_sitter::is_typing_variable(node, byte_offset, rope) {
-        get_variable_completions(tree, rope, byte_offset)
-    } else if tree_sitter::is_in_method_context(node, byte_offset, rope) {
-        get_method_completions()
-    } else {
-        // Combine keywords and symbol (predicate) completions
-        let mut completions = get_keyword_completions();
-        completions.extend(get_symbol_completions(tree, rope));
-        completions
+    let mut completions = Vec::new();
+
+    if valid_insertions.contains(&Insertion::MethodName) {
+        completions.extend(get_method_completions());
+        // TODO make keywords context-aware
+        return completions;
     }
+
+    if valid_insertions.contains(&Insertion::PredicateName) {
+        completions.extend(get_symbol_completions(tree, rope));
+        // Falls through to also add keywords below: a predicate-name position
+        // (top-level, rule_body start) is also always a valid position to
+        // start typing a keyword ("check if", "allow if", ...). TODO: make
+        // keyword completions context-aware instead of always adding all of
+        // them here.
+    } else if valid_insertions.contains(&Insertion::Variable)
+        || valid_insertions.contains(&Insertion::Term)
+    {
+        completions.extend(get_variable_completions(tree, rope, byte_offset));
+        // TODO make keywords context-aware
+        return completions;
+    }
+
+    completions.extend(get_keyword_completions());
+    completions
 }
 
 /// Generate placeholders given the provided arity
@@ -151,7 +167,7 @@ fn get_method_completions() -> Vec<CompletionItem> {
 
 /// Get keyword completions for biscuit language constructs
 fn get_keyword_completions() -> Vec<CompletionItem> {
-    tree_sitter::KEYWORDS
+    KEYWORDS
         .iter()
         .map(|(keyword, description, has_snippet)| {
             let insert_text = if *has_snippet {
@@ -175,6 +191,3 @@ fn get_keyword_completions() -> Vec<CompletionItem> {
         })
         .collect()
 }
-
-// All completion tests have been moved to YAML test files in tests/completion/
-// Run with: cargo test --test completion_tests

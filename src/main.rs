@@ -3,8 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-mod completion;
-mod tree_sitter;
+use biscuit_language_server::{completion, tree_sitter};
 
 use nom::Offset;
 
