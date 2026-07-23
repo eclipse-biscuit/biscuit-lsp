@@ -13,6 +13,22 @@ use tree_sitter::Parser;
 // Re-export commonly used tree-sitter types for convenience
 pub use tree_sitter::Tree;
 
+/// Biscuit language keywords with their descriptions
+/// Format: (keyword, description, has_snippet)
+pub const KEYWORDS: &[(&str, &str, bool)] = &[
+    ("check if", "Check constraint", true),
+    ("check all", "Check all constraints", true),
+    ("reject if", "Reject if condition", true),
+    ("allow if", "Allow if condition (policy)", true),
+    ("deny if", "Deny if condition (policy)", true),
+    ("trusting", "Origin clause", true),
+    ("previous", "Trust previous block", false),
+    ("authority", "Trust authority block", false),
+    ("true", "Boolean true", false),
+    ("false", "Boolean false", false),
+    ("null", "Null value", false),
+];
+
 /// Document data including rope and parse tree
 #[derive(Debug)]
 pub struct DocumentData {

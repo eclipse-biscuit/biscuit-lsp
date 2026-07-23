@@ -24,7 +24,10 @@ pub fn get_completions(
     } else if tree_sitter::is_in_method_context(node, byte_offset, rope) {
         get_method_completions()
     } else {
-        get_symbol_completions(tree, rope)
+        // Combine keywords and symbol (predicate) completions
+        let mut completions = get_keyword_completions();
+        completions.extend(get_symbol_completions(tree, rope));
+        completions
     }
 }
 
@@ -143,6 +146,33 @@ fn get_method_completions() -> Vec<CompletionItem> {
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         }])
+        .collect()
+}
+
+/// Get keyword completions for biscuit language constructs
+fn get_keyword_completions() -> Vec<CompletionItem> {
+    tree_sitter::KEYWORDS
+        .iter()
+        .map(|(keyword, description, has_snippet)| {
+            let insert_text = if *has_snippet {
+                Some(format!("{} $0", keyword))
+            } else {
+                None
+            };
+
+            CompletionItem {
+                label: keyword.to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some(description.to_string()),
+                insert_text,
+                insert_text_format: if *has_snippet {
+                    Some(InsertTextFormat::SNIPPET)
+                } else {
+                    None
+                },
+                ..Default::default()
+            }
+        })
         .collect()
 }
 
@@ -449,5 +479,112 @@ bar($bar) <- foo($bar), $fo;"#;
             "Should suggest bar variable from rule head: {:?}",
             variable_labels
         );
+    }
+
+    #[test]
+    fn test_keywords_suggested_with_predicates() {
+        // Keywords should be suggested when not typing variables or in method context
+        let code = r#"foo(true);
+"#;
+
+        let doc_data = DocumentData::from_text(code);
+        let tree = doc_data.tree.as_ref().unwrap();
+
+        // Position at the end after newline
+        let offset = code.len();
+
+        let completions = get_completions(tree, &doc_data.rope, offset);
+
+        // Should suggest keywords
+        let keyword_labels: Vec<_> = completions
+            .iter()
+            .filter(|c| c.kind == Some(CompletionItemKind::KEYWORD))
+            .map(|c| c.label.as_str())
+            .collect();
+        assert!(
+            keyword_labels.contains(&"check if"),
+            "Should suggest 'check if' keyword: {:?}",
+            keyword_labels
+        );
+        assert!(
+            keyword_labels.contains(&"true"),
+            "Should suggest 'true' keyword: {:?}",
+            keyword_labels
+        );
+        assert!(
+            keyword_labels.contains(&"false"),
+            "Should suggest 'false' keyword: {:?}",
+            keyword_labels
+        );
+
+        // Should also suggest predicates
+        let predicate_labels: Vec<_> = completions
+            .iter()
+            .filter(|c| c.kind == Some(CompletionItemKind::FUNCTION))
+            .map(|c| c.label.as_str())
+            .collect();
+        assert!(
+            predicate_labels.contains(&"foo/1"),
+            "Should suggest 'foo/1' predicate: {:?}",
+            predicate_labels
+        );
+    }
+
+    #[test]
+    fn test_no_keywords_when_typing_variable() {
+        // Keywords should NOT be suggested when typing a variable
+        let code = r#"check if user($uid, $name), role($u);"#;
+
+        let doc_data = DocumentData::from_text(code);
+        let tree = doc_data.tree.as_ref().unwrap();
+
+        // Position right after "$" in "$u"
+        let offset = code.find("$u)").unwrap() + 1;
+
+        let completions = get_completions(tree, &doc_data.rope, offset);
+
+        // Should NOT suggest keywords
+        let has_keywords = completions
+            .iter()
+            .any(|c| c.kind == Some(CompletionItemKind::KEYWORD));
+        assert!(
+            !has_keywords,
+            "Should not suggest keywords when typing a variable"
+        );
+
+        // Should only suggest variables (uid and name)
+        let has_variables = completions
+            .iter()
+            .any(|c| c.kind == Some(CompletionItemKind::VARIABLE));
+        assert!(has_variables, "Should suggest variables");
+    }
+
+    #[test]
+    fn test_no_keywords_in_method_context() {
+        // Keywords should NOT be suggested in method context
+        let code = r#"check if user("test")."#;
+
+        let doc_data = DocumentData::from_text(code);
+        let tree = doc_data.tree.as_ref().unwrap();
+
+        // Position right after "."
+        let offset = code.len();
+
+        let completions = get_completions(tree, &doc_data.rope, offset);
+
+        // Should NOT suggest keywords
+        let has_keywords = completions
+            .iter()
+            .any(|c| c.kind == Some(CompletionItemKind::KEYWORD));
+        assert!(
+            !has_keywords,
+            "Should not suggest keywords in method context"
+        );
+
+        // Should only suggest methods
+        let has_methods = completions
+            .iter()
+            .any(|c| c.kind == Some(CompletionItemKind::METHOD));
+        assert!(has_methods, "Should suggest methods");
     }
 }
