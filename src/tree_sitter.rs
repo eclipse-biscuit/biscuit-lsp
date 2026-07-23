@@ -427,41 +427,7 @@ mod tests {
         assert!(!node.is_error());
     }
 
-    #[test]
-    fn test_is_in_method_context_after_dot() {
-        let (tree, rope) = parse_biscuit("check if $x.");
-        let root = tree.root_node();
-
-        // Position right after the dot
-        let after_dot_offset = 12;
-        let node = find_node_at_cursor(root, after_dot_offset);
-
-        assert!(is_in_method_context(node, after_dot_offset, &rope));
-    }
-
-    #[test]
-    fn test_is_in_method_context_inside_methods() {
-        let (tree, rope) = parse_biscuit("check if $x.contains(\"foo\");");
-        let root = tree.root_node();
-
-        // Position inside "contains"
-        let contains_offset = 14;
-        let node = find_node_at_cursor(root, contains_offset);
-
-        assert!(is_in_method_context(node, contains_offset, &rope));
-    }
-
-    #[test]
-    fn test_is_not_in_method_context() {
-        let (tree, rope) = parse_biscuit("check if user($u);");
-        let root = tree.root_node();
-
-        // Position at "$u" - not in method context
-        let dollar_u_offset = 14;
-        let node = find_node_at_cursor(root, dollar_u_offset);
-
-        assert!(!is_in_method_context(node, dollar_u_offset, &rope));
-    }
+    // Method context tests have been moved to tests/completion/methods.yaml
 
     #[test]
     fn test_position_to_offset_first_line() {

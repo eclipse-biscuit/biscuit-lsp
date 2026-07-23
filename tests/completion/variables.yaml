@@ -1,0 +1,70 @@
+title: Variables from entire scope suggested
+input: |
+  check if user($u|), role($u, $r);
+completions:
+  contains:
+    - label: u
+      kind: VARIABLE
+    - label: r
+      kind: VARIABLE
+---
+title: Only variables after dollar sign
+input: |
+  foo(true);
+  bar($|) <- foo($foobar);
+completions:
+  contains:
+    - label: foobar
+      kind: VARIABLE
+  not_contains:
+    - kind: FUNCTION
+---
+title: No predicates when typing variable
+input: |
+  check if user($u), role($|u, $r);
+completions:
+  contains:
+    - label: u
+      kind: VARIABLE
+    - label: r
+      kind: VARIABLE
+  not_contains:
+    - kind: FUNCTION
+---
+title: Partial variable name no predicates
+input: |
+  check if user($u), role($u|ser, $r);
+completions:
+  contains:
+    - kind: VARIABLE
+  not_contains:
+    - kind: FUNCTION
+---
+title: Just dollar sign trailing
+input: |
+  foo(true);
+  bar($bar) <- foo($bar), $|
+completions:
+  contains:
+    - label: bar
+      kind: VARIABLE
+  not_contains:
+    - kind: FUNCTION
+---
+title: Partial variable with semicolon
+input: |
+  foo(true);
+  bar($bar) <- foo($bar), $fo|;
+completions:
+  contains:
+    - kind: VARIABLE
+  not_contains:
+    - kind: FUNCTION
+---
+title: Dollar in rule body
+input: |
+  foo($bar) <- $|;
+completions:
+  contains:
+    - label: bar
+      kind: VARIABLE

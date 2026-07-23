@@ -1,0 +1,32 @@
+title: Keywords suggested at top level
+input: |
+  foo(true);
+  |
+completions:
+  contains:
+    - label: "check if"
+      kind: KEYWORD
+    - label: "true"
+      kind: KEYWORD
+    - label: "false"
+      kind: KEYWORD
+    - label: "foo/1"
+      kind: FUNCTION
+---
+title: No keywords when typing variable
+input: |
+  check if user($uid, $name), role($u|);
+completions:
+  contains:
+    - kind: VARIABLE
+  not_contains:
+    - kind: KEYWORD
+---
+title: No keywords in method context
+input: |
+  check if user("test").|
+completions:
+  contains:
+    - kind: METHOD
+  not_contains:
+    - kind: KEYWORD
