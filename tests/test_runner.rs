@@ -7,7 +7,7 @@
 //! Test runner using libtest-mimic for dynamic test case generation
 
 use biscuit_language_server::testing::*;
-use biscuit_language_server::{completion, tree_sitter::DocumentData};
+use biscuit_language_server::{ast, completion, tree_sitter::DocumentData};
 use libtest_mimic::{Arguments, Trial};
 use std::fs;
 use std::path::PathBuf;
@@ -18,6 +18,17 @@ fn get_completions_for_test(code: &str, cursor_offset: usize) -> Vec<CompletionI
     let doc_data = DocumentData::from_text(code);
     let tree = doc_data.tree.as_ref().expect("Failed to parse tree");
     completion::get_completions(tree, &doc_data.rope, cursor_offset)
+}
+
+/// Get cursor context for a test case, as `Debug`-formatted `ast::Insertion` names
+/// (e.g. "PredicateName", "Term") — compared case-insensitively by the harness.
+fn get_context_for_test(code: &str, cursor_offset: usize) -> Vec<String> {
+    let doc_data = DocumentData::from_text(code);
+    let tree = doc_data.tree.as_ref().expect("Failed to parse tree");
+    ast::detect_valid_insertions(tree, &doc_data.rope, cursor_offset)
+        .into_iter()
+        .map(|insertion| format!("{:?}", insertion))
+        .collect()
 }
 
 fn main() {
@@ -51,7 +62,8 @@ fn main() {
             let test_name = format!("{}::{}", file_name, test_case.title.replace(" ", "_"));
 
             let trial = Trial::test(test_name, move || {
-                run_test_case(&test_case, get_completions_for_test, None).into_result()
+                run_test_case(&test_case, get_completions_for_test, get_context_for_test)
+                    .into_result()
             });
             tests.push(trial);
         }
