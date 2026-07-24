@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use biscuit_language_server::{completion, tree_sitter};
+use biscuit_language_server::{completion, definition, references, tree_sitter};
 
 use nom::Offset;
 
@@ -53,8 +53,9 @@ impl LanguageServer for Backend {
                     file_operations: None,
                 }),
                 semantic_tokens_provider: None,
-                definition_provider: None,
-                references_provider: None,
+                definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 rename_provider: None,
                 ..ServerCapabilities::default()
             },
@@ -91,6 +92,121 @@ impl LanguageServer for Backend {
         let items = completion::get_completions(tree, &doc_data.rope, byte_offset);
 
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let doc_data = match self.document_map.get(&uri.to_string()) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let byte_offset = tree_sitter::position_to_offset(&position, &doc_data.rope).unwrap_or(0);
+
+        let location = definition::find_definition(tree, &doc_data.rope, byte_offset).and_then(
+            |(start, end)| {
+                Some(Location {
+                    uri,
+                    range: Range::new(
+                        offset_to_position(start, &doc_data.rope)?,
+                        offset_to_position(end, &doc_data.rope)?,
+                    ),
+                })
+            },
+        );
+
+        Ok(location.map(GotoDefinitionResponse::Scalar))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+
+        let doc_data = match self.document_map.get(&uri.to_string()) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+        let byte_offset = tree_sitter::position_to_offset(&position, rope).unwrap_or(0);
+
+        let mut occurrences = references::find_references(tree, rope, byte_offset);
+
+        // `find_references` always includes the declaration; drop it when the
+        // client asked to exclude it.
+        if !include_declaration {
+            if let Some(decl) = definition::find_definition(tree, rope, byte_offset) {
+                occurrences.retain(|occurrence| *occurrence != decl);
+            }
+        }
+
+        let locations: Vec<Location> = occurrences
+            .into_iter()
+            .filter_map(|(start, end)| {
+                Some(Location {
+                    uri: uri.clone(),
+                    range: Range::new(
+                        offset_to_position(start, rope)?,
+                        offset_to_position(end, rope)?,
+                    ),
+                })
+            })
+            .collect();
+
+        Ok(Some(locations))
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let doc_data = match self.document_map.get(&uri.to_string()) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+        let byte_offset = tree_sitter::position_to_offset(&position, rope).unwrap_or(0);
+
+        let highlights: Vec<DocumentHighlight> =
+            references::find_references(tree, rope, byte_offset)
+                .into_iter()
+                .filter_map(|(start, end)| {
+                    Some(DocumentHighlight {
+                        range: Range::new(
+                            offset_to_position(start, rope)?,
+                            offset_to_position(end, rope)?,
+                        ),
+                        kind: Some(DocumentHighlightKind::TEXT),
+                    })
+                })
+                .collect();
+
+        Ok(Some(highlights))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {

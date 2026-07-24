@@ -26,7 +26,7 @@ pub fn get_completions(
     }
 
     if valid_insertions.contains(&Insertion::PredicateName) {
-        completions.extend(get_symbol_completions(tree, rope));
+        completions.extend(get_predicate_completions(tree, rope));
     }
 
     if valid_insertions.contains(&Insertion::Variable) {
@@ -45,10 +45,10 @@ fn generate_placeholders(arity: usize) -> String {
 }
 
 /// Extract predicate names from the tree for completion
-fn get_symbol_completions(tree: &tree_sitter::Tree, rope: &Rope) -> Vec<CompletionItem> {
-    let symbols = tree_sitter::get_symbols(tree, rope);
+fn get_predicate_completions(tree: &tree_sitter::Tree, rope: &Rope) -> Vec<CompletionItem> {
+    let predicates = crate::ast::get_predicates(tree, rope);
 
-    symbols
+    predicates
         .into_iter()
         .map(|(name, arity)| CompletionItem {
             label: format!("{}/{}", name, arity),
@@ -71,10 +71,10 @@ fn get_variable_completions(
 ) -> Vec<CompletionItem> {
     let root = tree.root_node();
 
-    let context_node = tree_sitter::find_enclosing_context(root, byte_offset);
+    let context_node = crate::ast::find_enclosing_context(root, byte_offset);
 
     let variables = if let Some(context) = context_node {
-        tree_sitter::get_variables_in_scope(context, rope, byte_offset)
+        crate::ast::get_variables_in_scope(context, rope, byte_offset)
     } else {
         vec![]
     };
