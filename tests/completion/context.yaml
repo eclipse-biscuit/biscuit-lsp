@@ -1,0 +1,252 @@
+title: Variable context after dollar sign
+input: |
+  check if user($|);
+contexts:
+  - Term
+---
+title: Variable context inside variable name
+input: |
+  check if user($u|ser);
+contexts:
+  - Variable
+---
+title: Variable context at end of variable
+input: |
+  check if user($user|);
+contexts:
+  - Term
+---
+title: Variable context with partial variable in rule
+input: |
+  foo($bar) <- $fo|;
+contexts:
+  - Variable
+---
+title: Variable context in rule body
+input: |
+  foo($bar) <- user($|);
+contexts:
+  - Term
+---
+title: Variable context in method arguments
+input: |
+  foo($bar) <- user($bar), [].contains($|);
+contexts:
+  - Term
+---
+title: Method context after dot
+input: |
+  check if $x.|
+contexts:
+  - MethodName
+---
+title: Method context inside method name
+input: |
+  check if $x.cont|ains("foo");
+contexts:
+  - MethodName
+---
+title: Method context after string literal dot
+input: |
+  check if "test".|
+contexts:
+  - MethodName
+---
+title: Predicate context in predicate name
+input: |
+  check if use|r($u);
+contexts:
+  - PredicateName
+---
+title: Predicate context in rule head
+input: |
+  admin|($u) <- user($u);
+contexts:
+  - PredicateName
+---
+title: Predicate context in fact
+input: |
+  user|(true);
+contexts:
+  - PredicateName
+---
+title: Term context - empty predicate
+input: |
+  check if user(|);
+contexts:
+  - Term
+---
+title: Term context - after first argument
+input: |
+  check if user(true, |);
+contexts:
+  - Term
+---
+title: Term context - before closing paren
+input: |
+  check if role($u, "admin"|);
+contexts:
+  - Term
+---
+title: Term context - in check predicate
+input: |
+  check if user(|$u);
+contexts:
+  - Variable
+---
+title: Term context - in rule body predicate
+input: |
+  admin($u) <- user(|);
+contexts:
+  - Term
+---
+title: Predicate or expression context - rule body start
+input: |
+  admin($u) <- |;
+contexts:
+  - PredicateName
+  - Term
+---
+title: Predicate or expression context - predicate
+input: |
+  admin($u) <- |user($u);
+contexts:
+  - PredicateName
+  - Term
+---
+title: Predicate or expression context - after predicate
+input: |
+  admin($u) <- user($u), |;
+contexts:
+  - PredicateName
+  - Term
+---
+title: Expression context - in rule body
+input: |
+  admin($u) <- user($u), tr|ue;
+contexts:
+  - Term
+---
+title: Predicate or expression context - check body
+input: |
+  check if |true;
+contexts:
+  - PredicateName
+  - Term
+---
+title: Expression - inside array
+input: |
+  check if [|];
+contexts:
+  - FactTerm
+---
+title: Expression - inside array with items
+input: |
+  check if [1, |2];
+contexts:
+  - FactTerm
+---
+title: Expression - inside method argument
+input: |
+  check if [].contains(|);
+contexts:
+  - Term
+---
+title: Expression - inside method argument with value
+input: |
+  check if "test".contains(|"foo");
+contexts:
+  - Term
+---
+title: Expression - inside nested array
+input: |
+  check if [[1, |2]];
+contexts:
+  - FactTerm
+---
+title: Top-level - at start
+input: |
+  |check if user($u);
+contexts:
+  - PredicateName
+  - Policy
+  - Check
+  - OriginClause
+---
+title: Top-level - after statement
+input: |
+  check if user($u);
+  |
+contexts:
+  - PredicateName
+  - Policy
+  - Check
+  - OriginClause
+---
+title: Top-level - between statements
+input: |
+  check if user($u);
+  |allow if admin($a);
+contexts:
+  - PredicateName
+  - Policy
+  - Check
+---
+title: Top-level - empty file
+input: |
+  |
+contexts:
+  - PredicateName
+  - Policy
+  - Check
+  - OriginClause
+---
+title: Origin element - at start
+input: |
+  admin($u) <- user($u) trusting |;
+contexts:
+  - OriginElement
+---
+title: Origin element - before element
+input: |
+  admin($u) <- user($u) trusting |authority;
+contexts:
+  - OriginElement
+---
+title: Origin element - after comma
+input: |
+  admin($u) <- user($u) trusting authority, |;
+contexts:
+  - OriginElement
+---
+title: Origin element - inside authority
+input: |
+  admin($u) <- user($u) trusting auth|ority;
+contexts:
+  - OriginElement
+---
+title: Origin element - inside previous
+input: |
+  admin($u) <- user($u) trusting prev|ious;
+contexts:
+  - OriginElement
+---
+title: Origin element - at start of authority
+input: |
+  admin($u) <- user($u) trusting |authority;
+contexts:
+  - OriginElement
+---
+title: Origin element - second element
+input: |
+  admin($u) <- user($u) trusting authority, prev|ious;
+contexts:
+  - OriginElement
+---
+title: Predicate name in unclosed check after a prior statement
+input: |
+  check if user($u);
+  check if |user
+contexts:
+  - PredicateName
+  - Term

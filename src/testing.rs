@@ -123,13 +123,14 @@ pub fn extract_cursor_position(input: &str) -> Result<(String, usize), String> {
 }
 
 /// Run a single test case
-pub fn run_test_case<F>(
+pub fn run_test_case<F, C>(
     test_case: &TestCase,
     completion_fn: F,
-    _action_fn: Option<()>, // Placeholder for future code action support
+    context_fn: C,
 ) -> TestResult
 where
     F: Fn(&str, usize) -> Vec<CompletionItem>,
+    C: Fn(&str, usize) -> Vec<String>,
 {
     // Extract cursor position
     let (clean_code, cursor_offset) = match extract_cursor_position(&test_case.input) {
@@ -152,9 +153,24 @@ where
     }
 
     // Test contexts if specified
-    if let Some(ref _expected_contexts) = test_case.contexts {
-        // TODO: Implement when context detection is available
-        return TestResult::Fail("Context testing not yet implemented".to_string());
+    if let Some(ref expected_contexts) = test_case.contexts {
+        let actual_contexts = context_fn(&clean_code, cursor_offset);
+
+        // Compare case-insensitively so YAML can spell variant names however
+        // is most readable (both sides are normalized, not just one).
+        let mut actual_sorted: Vec<String> =
+            actual_contexts.iter().map(|s| s.to_lowercase()).collect();
+        actual_sorted.sort();
+        let mut expected_sorted: Vec<String> =
+            expected_contexts.iter().map(|s| s.to_lowercase()).collect();
+        expected_sorted.sort();
+
+        if actual_sorted != expected_sorted {
+            return TestResult::Fail(format!(
+                "Context check failed: expected {:?}, got {:?}",
+                expected_sorted, actual_sorted
+            ));
+        }
     }
 
     TestResult::Pass

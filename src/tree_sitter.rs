@@ -13,22 +13,6 @@ use tree_sitter::Parser;
 // Re-export commonly used tree-sitter types for convenience
 pub use tree_sitter::Tree;
 
-/// Biscuit language keywords with their descriptions
-/// Format: (keyword, description, has_snippet)
-pub const KEYWORDS: &[(&str, &str, bool)] = &[
-    ("check if", "Check constraint", true),
-    ("check all", "Check all constraints", true),
-    ("reject if", "Reject if condition", true),
-    ("allow if", "Allow if condition (policy)", true),
-    ("deny if", "Deny if condition (policy)", true),
-    ("trusting", "Origin clause", true),
-    ("previous", "Trust previous block", false),
-    ("authority", "Trust authority block", false),
-    ("true", "Boolean true", false),
-    ("false", "Boolean false", false),
-    ("null", "Null value", false),
-];
-
 /// Document data including rope and parse tree
 #[derive(Debug)]
 pub struct DocumentData {
@@ -286,91 +270,6 @@ pub fn find_node_at_cursor(root: tree_sitter::Node, byte_offset: usize) -> tree_
     }
 
     node
-}
-
-/// Check if we're in a context where method completion makes sense
-pub fn is_in_method_context(node: tree_sitter::Node, byte_offset: usize, rope: &Rope) -> bool {
-    // Check if we're inside a methods node
-    let mut current = node;
-    loop {
-        if current.kind() == "methods" {
-            return true;
-        }
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => break,
-        }
-    }
-
-    // Check if the previous character is a dot
-    if byte_offset > 0 {
-        let prev_char = rope.byte_slice((byte_offset - 1)..byte_offset);
-        if prev_char == "." {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Check if cursor is typing a variable (using tree-sitter grammar)
-/// This includes being inside a variable node or right after one
-pub fn is_typing_variable(node: tree_sitter::Node, byte_offset: usize, rope: &Rope) -> bool {
-    // Check if current node is a variable
-    if node.kind() == "variable" {
-        return true;
-    }
-
-    // Check if any parent is a variable
-    let mut current = Some(node);
-    while let Some(n) = current {
-        if n.kind() == "variable" && byte_offset >= n.start_byte() && byte_offset <= n.end_byte() {
-            return true;
-        }
-        current = n.parent();
-    }
-
-    // Also check if cursor is right after a variable (e.g., cursor at the end of "$fo")
-    // This handles the case where cursor is at the boundary between variable and next token
-    // Recursively search for a variable node that ends at cursor position
-    fn find_variable_ending_at(node: tree_sitter::Node, byte_offset: usize) -> bool {
-        // Check current node
-        if node.kind() == "variable" && node.end_byte() == byte_offset {
-            return true;
-        }
-
-        // If this node ends at or before cursor, check its children
-        if node.end_byte() >= byte_offset {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if find_variable_ending_at(child, byte_offset) {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    // Search from root to find any variable ending at cursor
-    let root = {
-        let mut n = node;
-        while let Some(p) = n.parent() {
-            n = p;
-        }
-        n
-    };
-    if find_variable_ending_at(root, byte_offset) {
-        return true;
-    }
-
-    // Fallback: if tree-sitter doesn't detect a variable (e.g., incomplete parse with lone "$"),
-    // check if the character immediately before cursor is "$"
-    if byte_offset > 0 && rope.byte(byte_offset - 1) == b'$' {
-        return true;
-    }
-
-    false
 }
 
 /// Convert LSP position to byte offset in rope
@@ -640,4 +539,5 @@ another_predicate();"#,
             );
         }
     }
+
 }
