@@ -200,6 +200,12 @@ contexts:
   - Check
   - OriginClause
 ---
+title: Origin clause - end of rule body
+input: |
+  admin($u) <- user($u) |;
+contexts:
+  - OriginClause
+---
 title: Origin element - at start
 input: |
   admin($u) <- user($u) trusting |;
@@ -246,6 +252,13 @@ title: Predicate name in unclosed check after a prior statement
 input: |
   check if user($u);
   check if |user
+contexts:
+  - PredicateName
+  - Term
+---
+title: Right after check if
+input: |
+  check if |
 contexts:
   - PredicateName
   - Term
