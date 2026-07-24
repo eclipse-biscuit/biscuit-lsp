@@ -8,6 +8,7 @@
 //! accomodating partial ASTs encountered where the user is typing code.
 
 use ropey::Rope;
+use std::collections::HashSet;
 
 use crate::tree_sitter;
 
@@ -447,3 +448,281 @@ pub const METHODS: &[(&str, &str, bool)] = &[
     ("get", "Get element from array/map", true),
     ("try_or", "Try operation or return fallback value", true),
 ];
+
+pub fn predicate_name_node<'a>(node: &::tree_sitter::Node<'a>) -> Option<::tree_sitter::Node<'a>> {
+    let name = match node.kind() {
+        "fact" | "predicate" => node.child(0)?,
+        _ => return None,
+    };
+    (name.kind() == "nname").then_some(name)
+}
+
+pub fn count_predicate_arguments(node: &::tree_sitter::Node) -> usize {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(|child| matches!(child.kind(), "term" | "fact_term"))
+        .count()
+}
+
+pub fn predicate_name_and_arity_query(
+    name_node: &::tree_sitter::Node,
+    parent: &::tree_sitter::Node,
+    rope: &Rope,
+) -> Option<(String, usize)> {
+    matches!(parent.kind(), "fact" | "predicate").then(|| {
+        (
+            tree_sitter::node_text(name_node, rope),
+            count_predicate_arguments(parent),
+        )
+    })
+}
+
+pub fn matching_predicate_name(
+    node: &::tree_sitter::Node,
+    rope: &Rope,
+    name: &str,
+    arity: usize,
+) -> Option<tree_sitter::ByteRange> {
+    let name_node = predicate_name_node(node)?;
+    (tree_sitter::node_text(&name_node, rope) == name && count_predicate_arguments(node) == arity)
+        .then(|| (name_node.start_byte(), name_node.end_byte()))
+}
+
+pub fn variable_nodes<'a>(scope: &::tree_sitter::Node<'a>) -> Vec<::tree_sitter::Node<'a>> {
+    let mut nodes = Vec::new();
+    tree_sitter::visit_node(scope, &mut |node| {
+        if node.kind() == "variable" {
+            nodes.push(*node);
+        }
+    });
+    nodes
+}
+
+pub fn variable_occurrences(
+    scope: &::tree_sitter::Node,
+    rope: &Rope,
+    var_name: &str,
+) -> Vec<tree_sitter::ByteRange> {
+    variable_nodes(scope)
+        .into_iter()
+        .filter(|node| tree_sitter::node_text(node, rope) == var_name)
+        .map(|node| (node.start_byte(), node.end_byte()))
+        .collect()
+}
+
+pub fn get_predicates(tree: &tree_sitter::Tree, rope: &Rope) -> Vec<(String, usize)> {
+    let mut predicates = HashSet::new();
+    tree_sitter::visit_node(&tree.root_node(), &mut |node| {
+        if let Some(name_node) = predicate_name_node(node) {
+            let name = tree_sitter::node_text(&name_node, rope);
+            if !name.contains('\n') {
+                predicates.insert((name, count_predicate_arguments(node)));
+            }
+        }
+    });
+    predicates.into_iter().collect()
+}
+
+pub fn get_variables_in_scope(
+    context: ::tree_sitter::Node,
+    rope: &Rope,
+    byte_offset: usize,
+) -> Vec<String> {
+    variable_nodes(&context)
+        .into_iter()
+        // Exclude only the variable being typed (cursor within its range).
+        .filter(|node| !(byte_offset >= node.start_byte() && byte_offset <= node.end_byte()))
+        .map(|node| {
+            let text = tree_sitter::node_text(&node, rope);
+            text.strip_prefix('$').unwrap_or(&text).to_string()
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Find the enclosing rule, check, or policy node for the given byte offset.
+/// If no proper context is found, returns the nearest ERROR node as a fallback.
+pub fn find_enclosing_context(
+    root: ::tree_sitter::Node,
+    byte_offset: usize,
+) -> Option<::tree_sitter::Node> {
+    let mut current = root.descendant_for_byte_range(byte_offset, byte_offset);
+
+    // If we got the root and we're not at position 0, try one byte before
+    // This handles cases where cursor is at the very end of content
+    if let Some(node) = current {
+        if node.kind() == "source_file" && byte_offset > 0 {
+            current = root.descendant_for_byte_range(
+                byte_offset.saturating_sub(1),
+                byte_offset.saturating_sub(1),
+            );
+        }
+    }
+
+    let mut current = current?;
+    let mut error_fallback = None;
+
+    // Walk up the tree to find a rule, check, or policy node
+    loop {
+        match current.kind() {
+            "rule" | "check" | "policy" => return Some(current),
+            "ERROR"
+                // Remember the ERROR node as a fallback
+                if error_fallback.is_none() => {
+                    error_fallback = Some(current);
+                }
+            _ => {}
+        }
+
+        // Before moving to parent, check if any siblings are rule/check/policy
+        // This handles cases where cursor is at a sibling of the context (e.g., at ";")
+        if let Some(parent) = current.parent() {
+            let mut cursor = parent.walk();
+            for sibling in parent.children(&mut cursor) {
+                if matches!(sibling.kind(), "rule" | "check" | "policy")
+                    && sibling.start_byte() <= byte_offset
+                    && sibling.end_byte() >= byte_offset
+                {
+                    return Some(sibling);
+                }
+            }
+            current = parent;
+        } else {
+            // Reached the root without finding a proper context
+            // Use ERROR node as fallback if available
+            return error_fallback;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree_sitter::{node_text, visit_node};
+    use ::tree_sitter::Parser;
+    use ropey::Rope;
+
+    fn parse_biscuit(code: &str) -> (::tree_sitter::Tree, Rope) {
+        let mut parser = Parser::new();
+        parser
+            .set_language(tree_sitter_biscuit::language())
+            .unwrap();
+        let tree = parser.parse(code, None).unwrap();
+        let rope = Rope::from_str(code);
+        (tree, rope)
+    }
+
+    fn find_first_node_of_kind<'a>(
+        node: ::tree_sitter::Node<'a>,
+        kind: &str,
+    ) -> Option<::tree_sitter::Node<'a>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = find_first_node_of_kind(child, kind) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_find_enclosing_context_in_rule() {
+        let (tree, _rope) = parse_biscuit("admin($u) <- user($u), role($u, \"admin\");");
+        let context = find_enclosing_context(tree.root_node(), 20); // inside "user($u)"
+        assert_eq!(context.unwrap().kind(), "rule");
+    }
+
+    #[test]
+    fn test_find_enclosing_context_in_check() {
+        let (tree, _rope) = parse_biscuit("check if user($u);");
+        let context = find_enclosing_context(tree.root_node(), 12); // inside "user"
+        assert_eq!(context.unwrap().kind(), "check");
+    }
+
+    #[test]
+    fn test_find_enclosing_context_outside() {
+        let (tree, _rope) = parse_biscuit("user(\"alice\");");
+        // A fact is not a rule/check/policy, so there is no enclosing context.
+        assert!(find_enclosing_context(tree.root_node(), 5).is_none());
+    }
+
+    #[test]
+    fn test_count_predicate_arguments_fact_one() {
+        let (tree, _rope) = parse_biscuit("user(\"alice\");");
+        let fact = find_first_node_of_kind(tree.root_node(), "fact").unwrap();
+        assert_eq!(count_predicate_arguments(&fact), 1);
+    }
+
+    #[test]
+    fn test_count_predicate_arguments_fact_multiple() {
+        let (tree, _rope) = parse_biscuit("role(\"alice\", \"admin\");");
+        let fact = find_first_node_of_kind(tree.root_node(), "fact").unwrap();
+        assert_eq!(count_predicate_arguments(&fact), 2);
+    }
+
+    #[test]
+    fn test_count_predicate_arguments_one() {
+        let (tree, _rope) = parse_biscuit("check if user($u);");
+        let predicate = find_first_node_of_kind(tree.root_node(), "predicate").unwrap();
+        assert_eq!(count_predicate_arguments(&predicate), 1);
+    }
+
+    #[test]
+    fn test_count_predicate_arguments_multiple() {
+        let (tree, rope) = parse_biscuit("admin($u) <- user($u), role($u, \"admin\");");
+
+        let mut role_arities = Vec::new();
+        visit_node(&tree.root_node(), &mut |node| {
+            if node.kind() == "predicate"
+                && predicate_name_node(node)
+                    .map(|n| node_text(&n, &rope))
+                    .as_deref()
+                    == Some("role")
+            {
+                role_arities.push(count_predicate_arguments(node));
+            }
+        });
+
+        assert_eq!(role_arities, vec![2]);
+    }
+
+    #[test]
+    fn test_get_predicates_deduplicates() {
+        // Same predicate name/arity appears as both fact and rule head.
+        let (tree, rope) = parse_biscuit(
+            r#"
+            user("alice");
+            user($u) <- admin($u);
+            "#,
+        );
+
+        let predicates = get_predicates(&tree, &rope);
+        assert_eq!(
+            predicates
+                .iter()
+                .filter(|(name, arity)| name == "user" && *arity == 1)
+                .count(),
+            1
+        );
+        assert_eq!(
+            predicates
+                .iter()
+                .filter(|(name, arity)| name == "admin" && *arity == 1)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_get_predicates_multiline_error_node() {
+        // Error recovery can produce an nname spanning lines; such names are skipped.
+        let (tree, rope) = parse_biscuit("user\nanother_predicate();");
+        for (name, _arity) in get_predicates(&tree, &rope) {
+            assert!(!name.contains('\n'), "unexpected multiline name: {name:?}");
+        }
+    }
+}
