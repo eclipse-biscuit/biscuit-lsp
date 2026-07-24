@@ -24,6 +24,43 @@ pub struct TestCase {
     pub contexts: Option<Vec<String>>,
 }
 
+/// A code action as seen by the test harness: its title and the byte-range
+/// edits it would apply (`(start, end, replacement)`).
+#[derive(Debug, Clone)]
+pub struct ActionForTest {
+    pub title: String,
+    pub edits: Vec<(usize, usize, String)>,
+}
+
+/// Matcher for an offered action: a bare title, or a `{ title, result }` map
+/// that also asserts the document text after the action is applied.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ActionMatcher {
+    Title(String),
+    Detailed {
+        title: String,
+        #[serde(default)]
+        result: Option<String>,
+    },
+}
+
+impl ActionMatcher {
+    fn title(&self) -> &str {
+        match self {
+            ActionMatcher::Title(title) => title,
+            ActionMatcher::Detailed { title, .. } => title,
+        }
+    }
+
+    fn result(&self) -> Option<&str> {
+        match self {
+            ActionMatcher::Title(_) => None,
+            ActionMatcher::Detailed { result, .. } => result.as_deref(),
+        }
+    }
+}
+
 /// Expectation for completion items - either exact match or partial (contains/not_contains)
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -41,10 +78,10 @@ pub enum CompletionExpectation {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum ActionExpectation {
-    Exact(Vec<String>),
+    Exact(Vec<ActionMatcher>),
     Partial {
         #[serde(default)]
-        contains: Vec<String>,
+        contains: Vec<ActionMatcher>,
         #[serde(default)]
         not_contains: Vec<String>,
     },
@@ -123,10 +160,16 @@ pub fn extract_cursor_position(input: &str) -> Result<(String, usize), String> {
 }
 
 /// Run a single test case
-pub fn run_test_case<F, C>(test_case: &TestCase, completion_fn: F, context_fn: C) -> TestResult
+pub fn run_test_case<F, C, A>(
+    test_case: &TestCase,
+    completion_fn: F,
+    context_fn: C,
+    action_fn: A,
+) -> TestResult
 where
     F: Fn(&str, usize) -> Vec<CompletionItem>,
     C: Fn(&str, usize) -> Vec<String>,
+    A: Fn(&str, usize) -> Vec<ActionForTest>,
 {
     // Extract cursor position
     let (clean_code, cursor_offset) = match extract_cursor_position(&test_case.input) {
@@ -142,10 +185,12 @@ where
         }
     }
 
-    // Test actions if specified
-    if let Some(ref _expectation) = test_case.actions {
-        // TODO: Implement when code actions are available
-        return TestResult::Fail("Code action testing not yet implemented".to_string());
+    // Test actions if specified (offered titles, and optionally applied output)
+    if let Some(ref expectation) = test_case.actions {
+        let actions = action_fn(&clean_code, cursor_offset);
+        if let Err(e) = check_actions(expectation, &actions, &clean_code) {
+            return TestResult::Fail(format!("Action check failed: {}", e));
+        }
     }
 
     // Test contexts if specified
@@ -170,6 +215,90 @@ where
     }
 
     TestResult::Pass
+}
+
+/// Check that the offered code actions match the expectation. Each matcher
+/// verifies a title is (or isn't) offered, and — when it carries a `result` —
+/// that applying that action yields the expected document.
+fn check_actions(
+    expectation: &ActionExpectation,
+    actual: &[ActionForTest],
+    code: &str,
+) -> Result<(), String> {
+    let offered = |title: &str| actual.iter().any(|a| a.title == title);
+
+    match expectation {
+        ActionExpectation::Exact(expected) => {
+            for matcher in expected {
+                if !offered(matcher.title()) {
+                    return Err(format!("Expected action not found: {}", matcher.title()));
+                }
+                check_applied_result(matcher, actual, code)?;
+            }
+            for action in actual {
+                if !expected.iter().any(|m| m.title() == action.title) {
+                    return Err(format!("Unexpected action found: {}", action.title));
+                }
+            }
+            Ok(())
+        }
+        ActionExpectation::Partial {
+            contains,
+            not_contains,
+        } => {
+            for matcher in contains {
+                if !offered(matcher.title()) {
+                    return Err(format!("Required action not found: {}", matcher.title()));
+                }
+                check_applied_result(matcher, actual, code)?;
+            }
+            for title in not_contains {
+                if offered(title) {
+                    return Err(format!("Forbidden action found: {}", title));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// If `matcher` specifies a `result`, apply its action to `code` and check the
+/// output matches.
+fn check_applied_result(
+    matcher: &ActionMatcher,
+    actions: &[ActionForTest],
+    code: &str,
+) -> Result<(), String> {
+    let Some(expected) = matcher.result() else {
+        return Ok(());
+    };
+    let action = actions
+        .iter()
+        .find(|a| a.title == matcher.title())
+        .expect("caller already checked the action is offered");
+
+    let applied = apply_edits(code, &action.edits);
+    // Block scalars carry a trailing newline; compare without it.
+    if applied.trim_end() != expected.trim_end() {
+        return Err(format!(
+            "applying {:?}:\n  expected: {:?}\n       got: {:?}",
+            matcher.title(),
+            expected.trim_end(),
+            applied.trim_end()
+        ));
+    }
+    Ok(())
+}
+
+/// Apply byte-range edits to `code`, right-to-left so earlier offsets stay valid.
+fn apply_edits(code: &str, edits: &[(usize, usize, String)]) -> String {
+    let mut sorted = edits.to_vec();
+    sorted.sort_by_key(|(start, _, _)| *start);
+    let mut result = code.to_string();
+    for (start, end, new_text) in sorted.into_iter().rev() {
+        result.replace_range(start..end, &new_text);
+    }
+    result
 }
 
 /// Check that actual completions match the expectation

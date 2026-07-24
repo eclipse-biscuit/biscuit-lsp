@@ -3,7 +3,9 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use biscuit_language_server::{completion, definition, references, rename, tree_sitter};
+use biscuit_language_server::{
+    code_actions, completion, definition, references, rename, tree_sitter,
+};
 
 use nom::Offset;
 
@@ -57,6 +59,7 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -251,6 +254,26 @@ impl LanguageServer for Backend {
             changes: Some(changes),
             ..Default::default()
         }))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+
+        let doc_data = match self.document_map.get(&uri.to_string()) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+        let byte_offset = tree_sitter::position_to_offset(&params.range.start, rope).unwrap_or(0);
+
+        let actions = code_actions::code_actions(tree, rope, &uri, byte_offset);
+        Ok((!actions.is_empty()).then_some(actions))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {

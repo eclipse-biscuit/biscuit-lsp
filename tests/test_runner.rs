@@ -7,7 +7,7 @@
 //! Test runner using libtest-mimic for dynamic test case generation
 
 use biscuit_language_server::testing::*;
-use biscuit_language_server::{ast, completion, tree_sitter::DocumentData};
+use biscuit_language_server::{ast, code_actions, completion, tree_sitter::DocumentData};
 use libtest_mimic::{Arguments, Trial};
 use std::fs;
 use std::path::PathBuf;
@@ -28,6 +28,23 @@ fn get_context_for_test(code: &str, cursor_offset: usize) -> Vec<String> {
     ast::detect_valid_insertions(tree, &doc_data.rope, cursor_offset)
         .into_iter()
         .map(|insertion| format!("{:?}", insertion))
+        .collect()
+}
+
+/// Get the code actions offered at the cursor for a test case (title + edits)
+fn get_actions_for_test(code: &str, cursor_offset: usize) -> Vec<ActionForTest> {
+    let doc_data = DocumentData::from_text(code);
+    let tree = doc_data.tree.as_ref().expect("Failed to parse tree");
+    code_actions::proposed_actions(tree, &doc_data.rope, cursor_offset)
+        .into_iter()
+        .map(|action| ActionForTest {
+            title: action.title,
+            edits: action
+                .edits
+                .into_iter()
+                .map(|((start, end), new_text)| (start, end, new_text))
+                .collect(),
+        })
         .collect()
 }
 
@@ -62,8 +79,13 @@ fn main() {
             let test_name = format!("{}::{}", file_name, test_case.title.replace(" ", "_"));
 
             let trial = Trial::test(test_name, move || {
-                run_test_case(&test_case, get_completions_for_test, get_context_for_test)
-                    .into_result()
+                run_test_case(
+                    &test_case,
+                    get_completions_for_test,
+                    get_context_for_test,
+                    get_actions_for_test,
+                )
+                .into_result()
             });
             tests.push(trial);
         }
