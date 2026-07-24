@@ -3,15 +3,76 @@ input: |
   foo(true);
   |
 completions:
+  - label: "check if"
+    kind: KEYWORD
+  - label: "check all"
+    kind: KEYWORD
+  - label: "reject if"
+    kind: KEYWORD
+  - label: "allow if"
+    kind: KEYWORD
+  - label: "deny if"
+    kind: KEYWORD
+  - label: "foo/1"
+    kind: FUNCTION
+---
+title: Boolean keywords suggested in term context
+input: |
+  check if user($u, |);
+completions:
   contains:
-    - label: "check if"
-      kind: KEYWORD
     - label: "true"
       kind: KEYWORD
     - label: "false"
       kind: KEYWORD
-    - label: "foo/1"
-      kind: FUNCTION
+    - label: "null"
+      kind: KEYWORD
+  not_contains:
+    - label: "check if"
+      kind: KEYWORD
+    - label: "allow if"
+      kind: KEYWORD
+---
+title: Trusting keyword suggested at the start of a document
+input: |
+  |
+  foo(true);
+completion:
+  contains:
+    - label: "trusting"
+      kind: KEYWORD
+---
+title: scope keywords suggested in a document-wide trusting annotation
+input: |
+  trusting |
+  foo(true);
+completion:
+  contains:
+    - label: "authority"
+      kind: KEYWORD
+---
+title: Trusting keyword suggested at the end of a rule body
+input: |
+  admin($u) <- user($u) |;
+completions:
+  contains:
+    - label: "trusting"
+      kind: KEYWORD
+---
+ title: Origin keywords suggested after trusting
+ input: |
+   admin($u) <- user($u) trusting |;
+ completions:
+   contains:
+     - label: "previous"
+       kind: KEYWORD
+     - label: "authority"
+       kind: KEYWORD
+   not_contains:
+     - label: "check if"
+       kind: KEYWORD
+     - label: "true"
+       kind: KEYWORD
 ---
 title: No keywords when typing variable
 input: |
@@ -30,3 +91,12 @@ completions:
     - kind: METHOD
   not_contains:
     - kind: KEYWORD
+---
+title: Only terms and facts after check if
+input: |
+  check if |
+completions:
+  not_contains:
+    - label: "check if"
+      kind: KEYWORD
+

@@ -64,6 +64,7 @@ pub fn detect_valid_insertions(
         (None, None, false, Some(parent)) => children_in_context(node, parent),
         (None, None, false, None) => trailing_error_prev_char(root, rope, offset)
             .map(|ctx| vec![ctx])
+            .or_else(|| trailing_error_keyword(root))
             .unwrap_or_else(|| top_level_choices(root, offset)),
     }
 }
@@ -275,9 +276,41 @@ fn children_in_context(node: ::tree_sitter::Node, parent: ::tree_sitter::Node) -
         ("(", "predicate" | "fact") => vec![Insertion::PredicateName],
         ("(", "methods") => vec![Insertion::MethodName],
         ("variable", "term") => vec![Insertion::Variable],
+        (";", "authorizer_element") => {
+            trailing_origin_choice(node).unwrap_or_else(|| possible_children(parent.kind()))
+        }
         (_, "ERROR") => recover_error_keyword_prefix(parent).unwrap_or_default(),
         (_, parent_kind) => possible_children(parent_kind),
     }
+}
+
+/// At `<rule|check|policy> |;`: the cursor sits right after a complete
+/// `rule_body`, before the statement's terminating `;`. Nothing there is
+/// directly insertable without a leading `,` except the optional trailing
+/// origin clause, i.e. the `trusting` keyword itself — same signal as the
+/// document-start `OriginClause` case, not `OriginElement` (which is for
+/// *inside* an already-started clause, where `trusting` can't recur).
+fn trailing_origin_choice(semicolon: ::tree_sitter::Node) -> Option<Vec<Insertion>> {
+    let statement = semicolon.prev_sibling()?;
+    if !matches!(statement.kind(), "rule" | "check" | "policy") {
+        return None;
+    }
+    let rule_body = last_child(statement)?;
+    if rule_body.kind() != "rule_body" {
+        return None;
+    }
+    let has_origin_clause = last_child(rule_body).map(|n| n.kind()) == Some("origin_clause");
+    (!has_origin_clause).then_some(vec![Insertion::OriginClause])
+}
+
+/// Recover when the whole statement collapses into a trailing `ERROR` directly
+/// under `source_file` that nonetheless begins with a recognisable statement
+/// keyword (e.g. `check if |`, cursor past the keyword and nothing else typed).
+/// Unlike `children_in_context`'s `(_, "ERROR")` arm, the cursor here sits past
+/// the ERROR node so the point-based descent lands on `source_file` itself,
+/// leaving no parent to inspect — so we look at the root's last child directly.
+fn trailing_error_keyword(root: ::tree_sitter::Node) -> Option<Vec<Insertion>> {
+    recover_error_keyword_prefix(last_child(root)?)
 }
 
 fn recover_error_keyword_prefix(parent: ::tree_sitter::Node) -> Option<Vec<Insertion>> {
@@ -294,7 +327,10 @@ fn recover_error_keyword_prefix(parent: ::tree_sitter::Node) -> Option<Vec<Inser
 fn possible_children(parent_kind: &str) -> Vec<Insertion> {
     use Insertion::*;
     match parent_kind {
+        "rule" => vec![PredicateName], // rule head
         "rule_body" => vec![PredicateName, Term],
+        "check" => vec![PredicateName, Term], // same as rule_body
+        "policy" => vec![PredicateName, Term], // same as rule_body
         "expression" => vec![Term],
         "predicate" => vec![Term],
         "fact" => vec![FactTerm],
@@ -312,27 +348,75 @@ fn possible_children(parent_kind: &str) -> Vec<Insertion> {
         "set_term" => vec![SetTerm],
         "origin_clause" => vec![OriginElement],
         "origin_element" => vec![OriginElement],
-        "check" => vec![PredicateName, Term],
-        "policy" => vec![PredicateName, Term],
-        "rule" => vec![PredicateName],
         "authorizer_element" => vec![PredicateName, Policy, Check],
         _ => vec![],
     }
 }
 
-// the boolean allows inserting an extra space after the inserted keyword
-pub const KEYWORDS: &[(&str, &str, bool)] = &[
-    ("check if", "Check constraint", true),
-    ("check all", "Check all constraints", true),
-    ("reject if", "Reject if condition", true),
-    ("allow if", "Allow if condition (policy)", true),
-    ("deny if", "Deny if condition (policy)", true),
-    ("trusting", "Origin clause", true),
-    ("previous", "Trust previous block", false),
-    ("authority", "Trust authority block", false),
-    ("true", "Boolean true", false),
-    ("false", "Boolean false", false),
-    ("null", "Null value", false),
+// the boolean allows inserting an extra space after the inserted keyword;
+// the last field lists the `Insertion` contexts in which the keyword is valid
+pub const KEYWORDS: &[(&str, &str, bool, &[Insertion])] = &[
+    ("check if", "Check constraint", true, &[Insertion::Check]),
+    (
+        "check all",
+        "Check all constraints",
+        true,
+        &[Insertion::Check],
+    ),
+    (
+        "reject if",
+        "Reject if condition",
+        true,
+        &[Insertion::Check],
+    ),
+    (
+        "allow if",
+        "Allow if condition (policy)",
+        true,
+        &[Insertion::Policy],
+    ),
+    (
+        "deny if",
+        "Deny if condition (policy)",
+        true,
+        &[Insertion::Policy],
+    ),
+    (
+        "trusting",
+        "Origin clause",
+        true,
+        &[Insertion::OriginClause],
+    ),
+    (
+        "previous",
+        "Trust previous block",
+        false,
+        &[Insertion::OriginElement],
+    ),
+    (
+        "authority",
+        "Trust authority block",
+        false,
+        &[Insertion::OriginElement],
+    ),
+    (
+        "true",
+        "Boolean true",
+        false,
+        &[Insertion::Term, Insertion::FactTerm, Insertion::SetTerm],
+    ),
+    (
+        "false",
+        "Boolean false",
+        false,
+        &[Insertion::Term, Insertion::FactTerm, Insertion::SetTerm],
+    ),
+    (
+        "null",
+        "Null value",
+        false,
+        &[Insertion::Term, Insertion::FactTerm, Insertion::SetTerm],
+    ),
 ];
 
 pub const METHODS: &[(&str, &str, bool)] = &[

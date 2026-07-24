@@ -23,19 +23,17 @@ pub fn get_completions(
 
     if valid_insertions.contains(&Insertion::MethodName) {
         completions.extend(get_method_completions());
-        // TODO make keywords context-aware to avoid early returns
-        return completions;
     }
 
     if valid_insertions.contains(&Insertion::PredicateName) {
         completions.extend(get_symbol_completions(tree, rope));
-    } else if valid_insertions.contains(&Insertion::Variable) {
-        completions.extend(get_variable_completions(tree, rope, byte_offset));
-        // TODO make keywords context-aware to avoid early returns
-        return completions;
     }
 
-    completions.extend(get_keyword_completions());
+    if valid_insertions.contains(&Insertion::Variable) {
+        completions.extend(get_variable_completions(tree, rope, byte_offset));
+    }
+
+    completions.extend(get_keyword_completions(&valid_insertions));
     completions
 }
 
@@ -122,11 +120,12 @@ fn get_method_completions() -> Vec<CompletionItem> {
         .collect()
 }
 
-/// Get keyword completions for biscuit language constructs
-fn get_keyword_completions() -> Vec<CompletionItem> {
+/// Get keyword completions valid in the given insertion contexts
+fn get_keyword_completions(valid_insertions: &[Insertion]) -> Vec<CompletionItem> {
     KEYWORDS
         .iter()
-        .map(|(keyword, description, has_snippet)| {
+        .filter(|(_, _, _, contexts)| contexts.iter().any(|c| valid_insertions.contains(c)))
+        .map(|(keyword, description, has_snippet, _)| {
             let insert_text = if *has_snippet {
                 Some(format!("{} $0", keyword))
             } else {
