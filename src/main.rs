@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-use biscuit_language_server::{completion, definition, references, tree_sitter};
+use biscuit_language_server::{completion, definition, references, rename, tree_sitter};
 
 use nom::Offset;
 
@@ -56,7 +56,7 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
-                rename_provider: None,
+                rename_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -207,6 +207,50 @@ impl LanguageServer for Backend {
                 .collect();
 
         Ok(Some(highlights))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        let doc_data = match self.document_map.get(&uri.to_string()) {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let tree = match &doc_data.tree {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        let rope = &doc_data.rope;
+        let byte_offset = tree_sitter::position_to_offset(&position, rope).unwrap_or(0);
+
+        let edits = match rename::rename_edits(tree, rope, byte_offset, &params.new_name) {
+            Some(edits) => edits,
+            None => return Ok(None),
+        };
+
+        let text_edits: Vec<TextEdit> = edits
+            .into_iter()
+            .filter_map(|((start, end), new_text)| {
+                Some(TextEdit {
+                    range: Range::new(
+                        offset_to_position(start, rope)?,
+                        offset_to_position(end, rope)?,
+                    ),
+                    new_text,
+                })
+            })
+            .collect();
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri, text_edits);
+
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
