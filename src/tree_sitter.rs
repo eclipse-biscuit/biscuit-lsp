@@ -155,7 +155,7 @@ pub fn position_to_offset(position: &Position, rope: &Rope) -> Option<usize> {
 }
 
 /// Convert byte offset to LSP position
-fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
+pub fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
     let line = rope.try_byte_to_line(offset).ok()?;
     let first_char_of_line = rope.try_line_to_byte(line).ok()?;
     let column = offset - first_char_of_line;

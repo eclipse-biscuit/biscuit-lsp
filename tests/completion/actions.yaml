@@ -1,0 +1,66 @@
+---
+title: Add trusting clause offered on rule
+input: |
+  admin($u) <- us|er($u);
+actions:
+  contains:
+    - title: "Add trusting clause (authority)"
+      result: |
+        admin($u) <- user($u) trusting authority;
+---
+title: No trusting clause when one is already present
+input: |
+  admin($u) <- us|er($u) trusting authority;
+actions:
+  not_contains:
+    - "Add trusting clause (authority)"
+---
+title: Convert check offers the other two variants
+input: |
+  check if us|er($u);
+actions:
+  contains:
+    - "Convert to 'check all'"
+    - "Convert to 'reject if'"
+    - "Convert to 'allow if'"
+    - "Convert to 'deny if'"
+  not_contains:
+    - "Convert to 'check if'"
+---
+title: Convert check all reaches reject if
+input: |
+  check all us|er($u);
+actions:
+  contains:
+    - "Convert to 'check if'"
+    - title: "Convert to 'reject if'"
+      result: |
+        reject if user($u);
+  not_contains:
+    - "Convert to 'check all'"
+---
+title: Convert allow policy to deny
+input: |
+  allow if us|er($u);
+actions:
+  contains:
+    - title: "Convert to 'deny if'"
+      result: |
+        deny if user($u);
+    - "Convert to 'check if'"
+  not_contains:
+    - "Convert to 'allow if'"
+---
+title: Convert deny policy to allow
+input: |
+  deny if us|er($u);
+actions:
+  contains:
+    - "Convert to 'allow if'"
+  not_contains:
+    - "Convert to 'deny if'"
+---
+title: No actions on a fact
+input: |
+  us|er("alice");
+actions: []

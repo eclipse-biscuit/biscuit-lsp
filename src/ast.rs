@@ -596,6 +596,33 @@ pub fn find_enclosing_context(
     }
 }
 
+/// Walk up from `node` to the enclosing `rule`/`check`/`policy` statement.
+///
+/// Unlike [`find_enclosing_context`], this is a pure parent walk (no ERROR
+/// fallback): code actions only apply to well-formed statements.
+pub fn find_enclosing_statement<'a>(
+    node: &::tree_sitter::Node<'a>,
+) -> Option<::tree_sitter::Node<'a>> {
+    let mut current = *node;
+    loop {
+        if matches!(current.kind(), "rule" | "check" | "policy") {
+            return Some(current);
+        }
+        current = current.parent()?;
+    }
+}
+
+/// Whether a statement already carries a `trusting` (origin) clause.
+pub fn has_origin_clause(statement: &::tree_sitter::Node) -> bool {
+    let mut found = false;
+    tree_sitter::visit_node(statement, &mut |node| {
+        if node.kind() == "origin_clause" {
+            found = true;
+        }
+    });
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
